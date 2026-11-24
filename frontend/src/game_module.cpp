@@ -22,6 +22,14 @@ std::filesystem::path default_module_path() {
 }
 
 bool load_game_module(const std::filesystem::path& path, ntr::GameCode& code, std::string& error) {
+#ifdef __SWITCH__
+    // Static link: the game module is linked into the NRO (no dlopen on
+    // Horizon). The module is built from the player's own ROM on the PC;
+    // `path` is unused on Switch -- the ABI check below still applies.
+    (void)path;
+    extern "C" const NtrGameInfo* ntr_game_load(const NtrHostApi* api);
+    auto load = &ntr_game_load;
+#else
     SDL_SharedObject* lib = SDL_LoadObject(path.string().c_str());
     if (!lib) {
         error = "cannot load the game module " + path.string() + ": " + SDL_GetError();
@@ -33,14 +41,17 @@ bool load_game_module(const std::filesystem::path& path, ntr::GameCode& code, st
         SDL_UnloadObject(lib);
         return false;
     }
+#endif
     // The API table must outlive the module's use of it: the module keeps a copy, but keep ours for its life too.
     static NtrHostApi api;
     ntr_fill_host_api(&api);
     api.find_hook = &ph::find_hook;
     const NtrGameInfo* info = load(&api);
     if (!info || info->abi != NTR_ABI_VERSION) {
-        error = path.string() + " was built for another version of this program: rebuild it (2-BUILD.ps1)";
+        error = path.string() + " was built for another version of this program: rebuild it (Build-PhantomHourglass-Switch)";
+#ifndef __SWITCH__
         SDL_UnloadObject(lib);
+#endif
         return false;
     }
     code.game_code = info->game_code ? info->game_code : "";

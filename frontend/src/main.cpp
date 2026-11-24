@@ -1106,12 +1106,16 @@ int main(int argc, char** argv) {
     // ---- where settings and saves live: --data-dir, else data\ next to the program (portable.txt), else per user ----
     std::error_code ec;
     if (data_dir.empty()) {
+#ifdef __SWITCH__
+        data_dir = "sdmc:/switch/ph-recomp/data";
+#else
         if (fs::exists(base / "portable.txt", ec)) {
             data_dir = base / "data";
         } else if (char* pref = SDL_GetPrefPath("PH-Recomp", "PhantomHourglass")) {
             data_dir = pref;
             SDL_free(pref);
         }
+#endif
     }
     if (rom_path.empty()) {
         if (fs::exists(base / "rom" / "azep.nds", ec) && !fs::exists(base / "rom" / "azee.nds", ec))

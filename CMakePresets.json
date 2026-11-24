@@ -60,6 +60,22 @@
         "PH_GLES_SHADERS": "ON",
         "FETCHCONTENT_SOURCE_DIR_SDL3": "${sourceDir}/build/release/_deps/sdl3-src"
       }
+    },
+    {
+      "name": "switch",
+      "displayName": "Switch (devkitA64, software renderer first)",
+      "inherits": "base",
+      "condition": {
+        "type": "matches",
+        "string": "$env{DEVKITPRO}",
+        "regex": ".+"
+      },
+      "toolchainFile": "$env{DEVKITPRO}/cmake/Switch.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "PH_GLES_SHADERS": "OFF",
+        "PH_SWITCH": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -81,6 +97,10 @@
       "targets": [
         "PhantomHourglass"
       ]
+    },
+    {
+      "name": "switch",
+      "configurePreset": "switch"
     }
   ],
   "testPresets": [

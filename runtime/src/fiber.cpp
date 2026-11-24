@@ -46,8 +46,8 @@ void fiber_destroy(Fiber* f) {
 
 }  // namespace ntr
 
-#elif defined(__ANDROID__) && defined(__aarch64__)
-// Android's C library has no makecontext/swapcontext: a small context switch of our own. A suspended fiber's stack
+#elif (defined(__ANDROID__) || defined(__SWITCH__)) && defined(__aarch64__)
+// Android's and Switch's C libraries have no makecontext/swapcontext: a small context switch of our own. A suspended fiber's stack
 // holds its callee-saved registers (AAPCS64: x19-x30, d8-d15); its stack pointer is all a Fiber keeps.
 #include <cstdint>
 

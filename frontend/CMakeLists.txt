@@ -52,6 +52,46 @@ if(ANDROID)
   return()
 endif()
 
+# ---- Switch: the game's C comes from a PC build (recomp_generated), linked statically into the NRO ----
+# From ph-switch-builder/builder/switch-fork-skeleton/patches/04-frontend-cmake-switch.snippet.
+# UNPROVEN -- no devkitA64 compile was run. SDL3 must come from devkitPro's
+# `switch-sdl-3.4` branch (see third_party/CMakeLists.txt TODO); do not use
+# the stock FetchContent release-3.4.18 for Switch. -O1 for the game module
+# is deliberate (upstream default; the generated C is huge). PH_GENERATED_DIR
+# is the host build's recomp_generated/ (the builder passes it:
+# cmake --preset switch -DPH_GENERATED_DIR=<build/release/recomp_generated>).
+# The `switch` preset must define PH_SWITCH so this branch is taken; the
+# top-level CMakeLists.txt must not try to build ntr-recomp with the
+# devkitA64 compiler (host tool -- build it with the host presets first, as
+# the Android flow does).
+if(PH_SWITCH)
+  set(PH_GENERATED_DIR "" CACHE PATH "The recomp_generated folder of a PC build (Build-PhantomHourglass-Switch step 4)")
+  if(NOT EXISTS "${PH_GENERATED_DIR}/func_table.c")
+    message(FATAL_ERROR "PH_GENERATED_DIR must be a PC build's recomp_generated folder (run the builder's host steps first)")
+  endif()
+  file(GLOB PH_GEN_SHARDS CONFIGURE_DEPENDS "${PH_GENERATED_DIR}/funcs_*.c")
+  add_library(ph_game STATIC ${PH_GENERATED_DIR}/func_table.c ${PH_GEN_SHARDS})
+  target_include_directories(ph_game PRIVATE ${PH_GENERATED_DIR} ${CMAKE_SOURCE_DIR}/runtime/include)
+  target_compile_definitions(ph_game PRIVATE NTR_GAME_MODULE=1)
+  set_target_properties(ph_game PROPERTIES C_VISIBILITY_PRESET hidden)
+  target_compile_options(ph_game PRIVATE -w -ffreestanding -fno-stack-protector -O1)
+  # NOTE: no -nostdlib link option here -- the static archive is linked into
+  # the NRO by the program target below; verify against the devkitA64 link
+  # before assuming the Android -nostdlib behaviour carries over.
+
+  add_executable(ph-recomp src/main.cpp src/game_module.cpp src/ph_hooks.cpp src/ph_stick.cpp src/ph_temple.cpp src/ph_text.cpp
+               ${PH_HD_FONT_SRC} src/png.cpp src/gl_present.cpp src/menu.cpp src/achievements.cpp)
+  target_include_directories(ph-recomp PRIVATE src ${CMAKE_SOURCE_DIR}/third_party/stb)
+  target_compile_options(ph-recomp PRIVATE -O2)
+  target_link_libraries(ph-recomp PRIVATE ph_game ntr_runtime ntr_common SDL3::SDL3-static nx)
+  # TODO: NRO packaging -- elf2nro + nacptool (fatal if missing, Fulldex's rule),
+  # icon + .nacp metadata, romfs if the presenter ever needs shaders.
+  # TODO: presenter -- v1 is the software renderer + thin deko3d presenter
+  # (spec section 5.2 gap #6); gl_present.cpp's GL path is NOT built for Switch
+  # until the Mesa GLES probe lands.
+  return()
+endif()
+
 # ---- the recompiled game: built only with PH_ROM (it is generated from the player's own ROM, never committed) ----
 if(PH_ROM)
   set(PH_GEN_DIR ${CMAKE_BINARY_DIR}/recomp_generated)
