@@ -84,8 +84,37 @@ if(PH_SWITCH)
   target_include_directories(ph-recomp PRIVATE src ${CMAKE_SOURCE_DIR}/third_party/stb)
   target_compile_options(ph-recomp PRIVATE -O2)
   target_link_libraries(ph-recomp PRIVATE ph_game ntr_runtime ntr_common SDL3::SDL3-static nx)
-  # TODO: NRO packaging -- elf2nro + nacptool (fatal if missing, Fulldex's rule),
-  # icon + .nacp metadata, romfs if the presenter ever needs shaders.
+
+  # ---- NRO packaging (Switch only) ----
+  # elf2nro + nacptool are fatal if missing (Fulldex's rule: install
+  # switch-dev with dkp-pacman). The .nro target runs on every build.
+  # Icon: frontend/res/icon.jpg (256x256 JPEG, generated from the project's
+  # own shape-drawn art by tools/gen_icon.py; override with -DPH_SWITCH_ICON).
+  # No romfs for v1: the software renderer needs no shaders on the card.
+  set(PH_SWITCH_ICON "${CMAKE_CURRENT_SOURCE_DIR}/res/icon.jpg" CACHE FILEPATH "256x256 JPEG icon for the Switch NRO")
+  if(NOT EXISTS "${PH_SWITCH_ICON}")
+    message(FATAL_ERROR "PH_SWITCH_ICON not found: ${PH_SWITCH_ICON} (generate it with tools/gen_icon.py)")
+  endif()
+  find_program(PH_ELF2NRO elf2nro PATHS "$ENV{DEVKITPRO}/tools/bin" NO_DEFAULT_PATH)
+  find_program(PH_NACPTOOL nacptool PATHS "$ENV{DEVKITPRO}/tools/bin" NO_DEFAULT_PATH)
+  if(NOT PH_ELF2NRO OR NOT PH_NACPTOOL)
+    message(FATAL_ERROR "elf2nro/nacptool not found in $ENV{DEVKITPRO}/tools/bin (devkitPro switch-dev tools are required for the Switch NRO)")
+  endif()
+  add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ph-recomp.nacp
+    COMMAND ${PH_NACPTOOL} --create "Phantom Hourglass" "Eladerino" "0.1.0"
+            ${CMAKE_CURRENT_BINARY_DIR}/ph-recomp.nacp
+    COMMENT "Creating ph-recomp.nacp"
+    VERBATIM)
+  add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ph-recomp.nro
+    COMMAND ${PH_ELF2NRO} $<TARGET_FILE:ph-recomp>
+            ${CMAKE_CURRENT_BINARY_DIR}/ph-recomp.nro
+            --icon=${PH_SWITCH_ICON} --nacp=${CMAKE_CURRENT_BINARY_DIR}/ph-recomp.nacp
+    DEPENDS ph-recomp ${CMAKE_CURRENT_BINARY_DIR}/ph-recomp.nacp ${PH_SWITCH_ICON}
+    COMMENT "Packaging ph-recomp.nro"
+    VERBATIM)
+  add_custom_target(ph-recomp-nro ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/ph-recomp.nro)
   # TODO: presenter -- v1 is the software renderer + thin deko3d presenter
   # (spec section 5.2 gap #6); gl_present.cpp's GL path is NOT built for Switch
   # until the Mesa GLES probe lands.

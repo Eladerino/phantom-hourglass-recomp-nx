@@ -405,27 +405,35 @@ endif()
 
 # ---- SDL3 (zlib licence): window, input and audio for the game executable ----
 # Downloaded at configure time into the build directory (not vendored).
-# TODO (Switch, ph-switch-builder snippet 05 -- SDL3-nx health is BUILDER-SPEC
-# section 6 gap #3, UNVERIFIED): for the Switch target, skip the FetchContent
-# SDL3 block below entirely and point the build at a locally built SDL3-nx.
-# The route is devkitPro's `switch-sdl-3.4` branch -- but the repository URL
-# was NOT confirmed from the dive sources, so no GIT_REPOSITORY/GIT_TAG is
-# written here; confirm it at fork time, do not guess it. Confirm the SDL3-nx
-# build provides working video, audio, gamepad AND touch drivers before
-# writing any Switch frontend code against them. Fallback if SDL3-nx proves
-# painful: downgrade the frontend to SDL2 (switch-sdl2 is a stock portlib).
-# The builder must fail loud when SDL3-nx is not available.
+# Switch: SDL3 comes from devkitPro's `switch-sdl-3.4` branch (confirmed from
+# Oracles NX's CMakeLists.txt, a primary source; the commit was verified with
+# `git ls-remote` before it was written here). Upstream SDL3 requires
+# pthreads, which libnx does not provide, so the upstream fetch dies at
+# configure time (sdl3-src/CMakeLists.txt:3696, "Threads are needed by many
+# SDL subsystems"). No GIT_SHALLOW on the Switch fetch: the tag is a full
+# commit SHA, and a shallow clone cannot reliably check it out.
+# TODO (Switch): confirm the SDL3-nx build provides working video, audio,
+# gamepad AND touch drivers on hardware before trusting it. Fallback if
+# SDL3-nx proves painful: downgrade the frontend to SDL2 (switch-sdl2 is a
+# stock portlib).
 if(FFCC_BUILD_GAME)
   include(FetchContent)
   set(SDL_SHARED OFF CACHE BOOL "" FORCE)
   set(SDL_STATIC ON CACHE BOOL "" FORCE)
   set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
   set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
-  FetchContent_Declare(SDL3
-    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-    GIT_TAG release-3.4.18
-    GIT_SHALLOW TRUE
-    EXCLUDE_FROM_ALL)
+  if(PH_SWITCH)
+    FetchContent_Declare(SDL3
+      GIT_REPOSITORY https://github.com/devkitPro/SDL.git
+      GIT_TAG c329016c0e338ab4397ad930f83330c9fe058348
+      EXCLUDE_FROM_ALL)
+  else()
+    FetchContent_Declare(SDL3
+      GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+      GIT_TAG release-3.4.18
+      GIT_SHALLOW TRUE
+      EXCLUDE_FROM_ALL)
+  endif()
   FetchContent_MakeAvailable(SDL3)
 
 endif()

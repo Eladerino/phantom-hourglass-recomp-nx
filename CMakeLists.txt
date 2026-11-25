@@ -34,7 +34,7 @@ option(FFCC_BUILD_TESTS "Build unit tests" ON)
 option(FFCC_BUILD_GAME "Build the runtime and game executable (needs the melonDS submodule)" ON)
 
 add_subdirectory(common)
-if(NOT ANDROID)  # (the phone build takes the game's C from a PC build: no recompiler or tools there)
+if(NOT ANDROID AND NOT PH_SWITCH)  # (the phone build takes the game's C from a PC build: no recompiler or tools there; same for Switch, which consumes the host build's recomp_generated/ via PH_GENERATED_DIR instead of building the host recompiler with devkitA64)
   add_subdirectory(recompiler)
   add_subdirectory(tools)
 endif()
