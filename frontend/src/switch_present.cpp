@@ -523,11 +523,12 @@ bool GlPresenter::read_screens(const ntr::Frame& frame, std::vector<uint32_t>& o
         return true;
     }
     if (!context_ || !frame.gl_texture) return false;
-    int w = 0, h = 0;
+    // The size is known, not queried: the presenter creates every array texture it shows at a fixed
+    // 256x192x2 (glTexImage3D at init; the uploads use the same constants). switch-mesa's GLES3/gl3.h
+    // does not declare glGetTexLevelParameteriv or GL_TEXTURE_WIDTH/GL_TEXTURE_HEIGHT, so asking the
+    // driver back does not compile under devkitA64 even though the symbols exist in libGLESv2.a.
+    const int w = 256, h = 192;
     glBindTexture(GL_TEXTURE_2D_ARRAY, frame.gl_texture);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D_ARRAY, 0, GL_TEXTURE_WIDTH, &w);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D_ARRAY, 0, GL_TEXTURE_HEIGHT, &h);
-    if (w <= 0 || h <= 0) return false;
     width = w;
     height = h * 2;
     out.resize(size_t(w) * h * 2);
