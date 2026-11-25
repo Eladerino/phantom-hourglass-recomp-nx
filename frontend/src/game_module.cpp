@@ -5,6 +5,16 @@
 #include "ntr/recomp.h"
 #include "ph_hooks.hpp"
 
+#ifdef __SWITCH__
+// Static link: the game module is linked into the NRO (no dlopen on
+// Horizon). The declaration must live at file scope: C++ forbids a
+// linkage-specification inside a function body, and the PC build's
+// dlopen path never exercised this branch (game_module.cpp:30 in
+// Phase E failed with "expected unqualified-id before string
+// constant"). NtrHostApi/NtrGameInfo come from ntr/recomp.h above.
+extern "C" const NtrGameInfo* ntr_game_load(const NtrHostApi* api);
+#endif
+
 namespace ph {
 
 std::filesystem::path default_module_path() {
@@ -26,8 +36,8 @@ bool load_game_module(const std::filesystem::path& path, ntr::GameCode& code, st
     // Static link: the game module is linked into the NRO (no dlopen on
     // Horizon). The module is built from the player's own ROM on the PC;
     // `path` is unused on Switch -- the ABI check below still applies.
+    // (ntr_game_load is declared at file scope above; see the comment there.)
     (void)path;
-    extern "C" const NtrGameInfo* ntr_game_load(const NtrHostApi* api);
     auto load = &ntr_game_load;
 #else
     SDL_SharedObject* lib = SDL_LoadObject(path.string().c_str());
