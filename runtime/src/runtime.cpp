@@ -12,7 +12,12 @@
 
 #include "Args.h"
 #include "GPU.h"
+#ifndef __SWITCH__  // (Switch: GPU_OpenGL.h pulls in PlatformOGL.h, whose MELONDS_GL_HEADER fallback is
+                     // "frontend/glad/glad.h" — devkitA64 GCC keeps the escaped quotes as literal filename
+                     // characters, so the include fails. The OpenGL renderers are not built on Switch and
+                     // every GLRenderer use in this file is already __SWITCH__-guarded.)
 #include "GPU_OpenGL.h"
+#endif
 #include "GPU_Soft.h"
 #include "NDSCart.h"
 #include "SPU.h"
