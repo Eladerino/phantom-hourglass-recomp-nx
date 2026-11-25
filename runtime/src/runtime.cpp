@@ -361,6 +361,7 @@ void RuntimeImpl::end_frame() {
         frame.scale = video_.scale;
         frame.wide_extra = video_.wide_extra;
         frame.wide_layer = n.GPU.ScreenSwap ? 0 : 1;  // (POWCNT1 bit 15: engine A on the top screen)
+#ifndef __SWITCH__  // (FfccHudSeen and the HUD moves live in GPU2D_OpenGL.cpp, not built on Switch)
         frame.hud_absent = melonDS::FfccHudSeen;
         if (melonDS::FfccHudEdges) {
             frame.hud_moves = std::clamp(melonDS::FfccHudMovedCount, 0, 32);
@@ -369,6 +370,7 @@ void RuntimeImpl::end_frame() {
                 frame.hud_move[i] = {m[0], m[1], m[2], m[3], m[4]};
             }
         }
+#endif
     }
     if (perf_mark_ != std::chrono::steady_clock::time_point{})
         frame.emu_ms = std::chrono::duration<double, std::milli>(emulated_until - perf_mark_).count();
@@ -951,6 +953,9 @@ void RuntimeImpl::apply_cpu_speed(int multiplier) {
 // Whether the compute renderer can run: desktop OpenGL 4.3, or on the phone OpenGL ES 3.1+ with its compute functions
 // (the shaders are made GLSL ES by third_party/gles_compute_fixes.cmake). Logged once.
 static bool compute_available() {
+#ifdef __SWITCH__
+    return false;  // (Switch: no OpenGL renderer — the software renderer only — so the compute renderer can never run)
+#else
 #ifdef __ANDROID__
     static int ok = -1;
     if (ok < 0) {
@@ -965,6 +970,7 @@ static bool compute_available() {
 #else
     return GLAD_GL_VERSION_4_3 != 0;
 #endif
+#endif
 }
 
 // Switches melonDS's renderer (between frames). Falls back to OpenGL when the context lacks compute shaders, and to
@@ -972,6 +978,15 @@ static bool compute_available() {
 void RuntimeImpl::apply_video(VideoSettings s) {
     melonDS::NDS& n = *nds;
     s.scale = std::clamp(s.scale, 1, 16);
+#ifdef __SWITCH__
+    // (Switch: the OpenGL renderers are not built — no dynamic loading under libnx — so the software renderer
+    // is the only one. Forcing it here keeps the GL paths below, and their glad/GLRenderer references, out of
+    // the Switch link entirely.)
+    if (s.renderer != Renderer::Software) {
+        log("video: Switch build: the software renderer only, using it\n");
+        s.renderer = Renderer::Software;
+    }
+#else
     if (s.renderer != Renderer::Software && !glEnable) {
         log("video: no OpenGL context, using the software renderer\n");
         s.renderer = Renderer::Software;
@@ -980,8 +995,11 @@ void RuntimeImpl::apply_video(VideoSettings s) {
         log("video: the compute renderer cannot run here (it needs OpenGL 4.3, or OpenGL ES 3.1), using OpenGL\n");
         s.renderer = Renderer::OpenGL;
     }
+#endif
     // (The widescreen picture is made by the OpenGL and compute renderers only.)
+#ifndef __SWITCH__  // (FfccComputeOutputWidth lives in GPU3D_Compute.cpp, not built on Switch)
     if (s.renderer != Renderer::Compute) melonDS::FfccComputeOutputWidth = 0;
+#endif
     if (s.renderer == Renderer::Software) s.wide_extra = 0;
     s.wide_extra = std::clamp(s.wide_extra, 0, 256);
     melonDS::FfccWideExtra = s.wide_extra;
@@ -990,17 +1008,21 @@ void RuntimeImpl::apply_video(VideoSettings s) {
     s.hud_scale = std::clamp(s.hud_scale, 50, 200);
     melonDS::FfccHudEdges = s.hud_edges && s.wide_extra;
     melonDS::FfccHudScale = s.hud_scale;
+#ifndef __SWITCH__  // (FfccHudSides lives in GPU2D_OpenGL.cpp, not built on Switch; the software renderer has no HUD moves)
     melonDS::FfccHudSides = s.hud_sides && melonDS::FfccHudEdges;
+#endif
     // (A new width needs the renderer's textures made again: a new renderer does that.)
     if (!video_applied_ || s.renderer != video_.renderer || s.wide_extra != video_.wide_extra) {
         if (s.renderer == Renderer::Software)
             n.SetRenderer(std::make_unique<melonDS::SoftRenderer>(n));
+#ifndef __SWITCH__
         else
             n.SetRenderer(std::make_unique<melonDS::GLRenderer>(n, s.renderer == Renderer::Compute));
         if (s.renderer != Renderer::Software && !dynamic_cast<melonDS::GLRenderer*>(&n.GetRenderer())) {
             log("video: the %s renderer failed to start, using the software renderer\n", renderer_name(s.renderer));
             s.renderer = Renderer::Software;
         }
+#endif
     }
     melonDS::RendererSettings rs{s.scale, s.threaded, s.hires_coordinates, s.better_polygons};
     n.GetRenderer().SetRenderSettings(rs);
@@ -1023,11 +1045,16 @@ void RuntimeImpl::apply_video(VideoSettings s) {
 }
 
 unsigned RuntimeImpl::render_between(double x) {
+#ifdef __SWITCH__
+    (void)x;
+    return 0;  // (Switch: display_rate is always off with the software renderer, so this is never reached)
+#else
     if (!gx_ || !gx_->display_rate) return 0;
     auto* gl = dynamic_cast<melonDS::GLRenderer*>(&nds->GetRenderer());
     if (!gl) return 0;
     if (!between_) between_ = std::make_unique<GlBetween>();
     return gx_->render_between(x, [&] { return between_->render(*gl); });
+#endif
 }
 
 const char* renderer_name(Renderer r) {

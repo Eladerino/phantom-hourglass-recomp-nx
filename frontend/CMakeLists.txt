@@ -79,8 +79,11 @@ if(PH_SWITCH)
   # the NRO by the program target below; verify against the devkitA64 link
   # before assuming the Android -nostdlib behaviour carries over.
 
+  # (Switch v1: the stub presenter, src/switch_present.cpp — the OpenGL presenter needs a GL loader libnx
+  # does not have, and the real presenter is BUILDER-SPEC gap #6. Same GlPresenter interface, so nothing
+  # else changes; the game runs with the software renderer but draws nothing yet.)
   add_executable(ph-recomp src/main.cpp src/game_module.cpp src/ph_hooks.cpp src/ph_stick.cpp src/ph_temple.cpp src/ph_text.cpp
-               ${PH_HD_FONT_SRC} src/png.cpp src/gl_present.cpp src/menu.cpp src/achievements.cpp)
+               ${PH_HD_FONT_SRC} src/png.cpp src/switch_present.cpp src/menu.cpp src/achievements.cpp)
   target_include_directories(ph-recomp PRIVATE src ${CMAKE_SOURCE_DIR}/third_party/stb)
   target_compile_options(ph-recomp PRIVATE -O2)
   target_link_libraries(ph-recomp PRIVATE ph_game ntr_runtime ntr_common SDL3::SDL3-static nx)
@@ -115,9 +118,9 @@ if(PH_SWITCH)
     COMMENT "Packaging ph-recomp.nro"
     VERBATIM)
   add_custom_target(ph-recomp-nro ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/ph-recomp.nro)
-  # TODO: presenter -- v1 is the software renderer + thin deko3d presenter
-  # (spec section 5.2 gap #6); gl_present.cpp's GL path is NOT built for Switch
-  # until the Mesa GLES probe lands.
+  # Presenter: v1 is the stub (src/switch_present.cpp) — the game runs with the software renderer but draws
+  # nothing yet. The real presenter (spec section 5.2 gap #6: Mesa GLES or a thin deko3d presenter showing
+  # the software renderer's frames) replaces the stub by swapping the one source above back to gl_present.cpp.
   return()
 endif()
 

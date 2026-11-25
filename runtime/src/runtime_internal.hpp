@@ -233,7 +233,11 @@ private:
 
     // GX command streams: frame interpolation, --gx-probe, --gx-check.
     std::unique_ptr<gx::Streams> gx_;
+#ifndef __SWITCH__
+    // (GlBetween is the GL renderer's frame interpolation; the OpenGL renderer — and gl_between.cpp — is not
+    // built on Switch, so the member does not exist there.)
     std::unique_ptr<GlBetween> between_;  // frames between emulated frames (display_rate)
+#endif
     double perf_host_s_ = 0, perf_max_s_ = 0;
     u64 perf_steps_mark_ = 0, perf_calls_mark_ = 0;
 };

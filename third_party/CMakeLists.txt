@@ -232,6 +232,18 @@ set(melonDS_VERSION "1.1")
 set(MELONDS_VERSION_SUFFIX "-ffcc")
 configure_file(${MS}/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/melonds_gen/version.h)
 
+# OpenGL renderers (classic and compute-shader 3D, upscaled 2D) and the GL function loader they use.
+# Not built on Switch: there is no dynamic loading under libnx (glad.c needs <dlfcn.h>, which does not exist
+# there), and v1 is the software renderer only — the same call melonDS Switch makes with
+# ENABLE_OGLRENDERER=OFF. The configure-time patch generation for these files above is untouched (it only
+# writes files; nothing here compiles them on Switch).
+if(NOT PH_SWITCH)
+  set(melonds_ogl_sources
+    ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/GPU_OpenGL.cpp ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/GPU2D_OpenGL.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/GPU3D_OpenGL.cpp ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/GPU3D_Compute.cpp
+    ${MS}/GPU3D_TexcacheOpenGL.cpp ${MS}/OpenGLSupport.cpp ${MS}/frontend/glad/glad.c)
+endif()
+
 add_library(melonds_core STATIC
   ${MS}/ARCodeFile.cpp ${MS}/ARDatabaseDAT.cpp ${MS}/AREngine.cpp ${MS}/ARM.cpp ${MS}/ARMInterpreter.cpp
   ${MS}/ARMInterpreter_ALU.cpp ${MS}/ARMInterpreter_Branch.cpp ${MS}/ARMInterpreter_LoadStore.cpp ${MS}/CP15.cpp
@@ -248,14 +260,15 @@ add_library(melonds_core STATIC
   ${MS}/NDSCart/CartHomebrew.cpp ${MS}/NDSCart/CartR4.cpp
   ${MS}/fatfs/ff.c ${MS}/fatfs/ffsystem.c ${MS}/fatfs/ffunicode.c
   ${MS}/sha1/sha1.c ${MS}/tiny-AES-c/aes.c ${MS}/xxhash/xxhash.c ${MS}/blip-buf/blip_buf.c
-  # OpenGL renderers (classic and compute-shader 3D, upscaled 2D) and the GL function loader they use.
-  ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/GPU_OpenGL.cpp ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/GPU2D_OpenGL.cpp
-  ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/GPU3D_OpenGL.cpp ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/GPU3D_Compute.cpp
-  ${MS}/GPU3D_TexcacheOpenGL.cpp ${MS}/OpenGLSupport.cpp ${MS}/frontend/glad/glad.c)
+  ${melonds_ogl_sources})
 set_target_properties(melonds_core PROPERTIES CXX_STANDARD 17)
 target_include_directories(melonds_core SYSTEM PUBLIC ${MS} ${CMAKE_CURRENT_BINARY_DIR}/melonds_gen)
-# (PlatformOGL.h's fallback for MELONDS_GL_HEADER is double-quoted, so define it as melonDS's frontend does.)
-target_compile_definitions(melonds_core PUBLIC OGLRENDERER_ENABLED MELONDS_GL_HEADER=\"frontend/glad/glad.h\")
+# (PlatformOGL.h's fallback for MELONDS_GL_HEADER is double-quoted, so define it as melonDS's frontend does.
+# Only with the OpenGL renderers: on Switch nothing in the core includes the GL headers, and PlatformOGL.h
+# defaults MELONDS_GL_HEADER to glad.h itself when it is not defined.)
+if(NOT PH_SWITCH)
+  target_compile_definitions(melonds_core PUBLIC OGLRENDERER_ENABLED MELONDS_GL_HEADER=\"frontend/glad/glad.h\")
+endif()
 
 # The GL renderers' GLSL sources, embedded as C string headers (as melonDS's own OpenGL_shaders/CMakeLists.txt does).
 set(MELONDS_SHADERS 2DLayerPreVS 2DLayerPreFS 2DSpritePreVS 2DSpritePreFS 2DSpriteVS 2DSpriteFS 2DCompositorVS
