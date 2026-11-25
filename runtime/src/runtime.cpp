@@ -361,12 +361,17 @@ void RuntimeImpl::end_frame() {
     if (n.GPU.GetFramebuffers(&top, &bottom)) {
         frame.top = static_cast<const uint32_t*>(top);
         frame.bottom = static_cast<const uint32_t*>(bottom);
-    } else {
+    }
+#ifndef __SWITCH__  // (the GL renderers are not built on Switch: the software renderer's GetFramebuffers
+                     // always returns the two framebuffers, so this branch — the GL array texture and its
+                     // scale/wide fields — never runs. Gating it also keeps GLuint, undeclared since Phase D
+                     // gated the GPU_OpenGL.h include, out of the Switch build.)
+    else {
         frame.gl_texture = *static_cast<const GLuint*>(top);
         frame.scale = video_.scale;
         frame.wide_extra = video_.wide_extra;
         frame.wide_layer = n.GPU.ScreenSwap ? 0 : 1;  // (POWCNT1 bit 15: engine A on the top screen)
-#ifndef __SWITCH__  // (FfccHudSeen and the HUD moves live in GPU2D_OpenGL.cpp, not built on Switch)
+        // (FfccHudSeen and the HUD moves live in GPU2D_OpenGL.cpp, not built on Switch)
         frame.hud_absent = melonDS::FfccHudSeen;
         if (melonDS::FfccHudEdges) {
             frame.hud_moves = std::clamp(melonDS::FfccHudMovedCount, 0, 32);
@@ -375,8 +380,8 @@ void RuntimeImpl::end_frame() {
                 frame.hud_move[i] = {m[0], m[1], m[2], m[3], m[4]};
             }
         }
-#endif
     }
+#endif
     if (perf_mark_ != std::chrono::steady_clock::time_point{})
         frame.emu_ms = std::chrono::duration<double, std::milli>(emulated_until - perf_mark_).count();
     frame.interp_steps = interp_steps_ - frame_steps_mark_;
