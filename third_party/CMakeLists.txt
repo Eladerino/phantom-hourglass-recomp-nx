@@ -412,7 +412,17 @@ if(WIN32)
   target_link_libraries(melonds_core PRIVATE ole32 comctl32 wsock32 ws2_32)
 else()
   find_package(Threads REQUIRED)
-  target_link_libraries(melonds_core PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+  # Switch: libdl does not exist under newlib/libnx (no dynamic loading on
+  # Horizon), and nothing in the Switch binary calls dlopen -- the game
+  # module is statically linked (game_module.cpp, #ifdef __SWITCH__) and
+  # SDL_LoadObject lives only in the non-Switch branch. Linking
+  # ${CMAKE_DL_LIBS} (-ldl) makes the final ph-recomp link fail with
+  # "cannot find -ldl" (Phase F rebuild, step 450/453).
+  if(PH_SWITCH)
+    target_link_libraries(melonds_core PRIVATE Threads::Threads)
+  else()
+    target_link_libraries(melonds_core PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+  endif()
   target_link_libraries(melonds_teakra PRIVATE Threads::Threads)
 endif()
 
