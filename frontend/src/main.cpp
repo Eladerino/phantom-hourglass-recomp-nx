@@ -1174,14 +1174,22 @@ int main(int argc, char** argv) {
     // ---- window: the largest whole multiple of the DS screen that fits the desktop with room to spare ----
     SDL_Rect usable{0, 0, 1280, 720};
     SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable);
+#ifdef __SWITCH__
+    // (Switch: the window is the display — 1280x720 handheld, 1920x1080 docked. SDL's Switch driver sizes
+    // the EGL surface from the window, and resizes it to exactly these dimensions on dock/undock, so a
+    // DS-sized window would leave the game letterboxed in the middle of the screen.)
+    const int win_w = usable.w > 0 ? usable.w : 1280, win_h = usable.h > 0 ? usable.h : 720;
+#else
     const int scale = std::max(1, std::min(int(usable.w * 0.9) / kW, int(usable.h * 0.85) / kH));
+    const int win_w = kW * scale, win_h = kH * scale;
+#endif
     ph::set_gl_attributes();
 #ifdef __ANDROID__
     const SDL_WindowFlags window_flags = SDL_WINDOW_FULLSCREEN | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_OPENGL;
 #else
     const SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_OPENGL;
 #endif
-    SDL_Window* window = SDL_CreateWindow(kTitle, kW * scale, kH * scale, window_flags);
+    SDL_Window* window = SDL_CreateWindow(kTitle, win_w, win_h, window_flags);
     if (!window) return error_box(std::string("Cannot open a window: ") + SDL_GetError()), 1;
     SDL_SetWindowMinimumSize(window, kW, kH);
     if (settings.fullscreen) SDL_SetWindowFullscreen(window, true);

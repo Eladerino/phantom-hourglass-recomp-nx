@@ -79,14 +79,26 @@ if(PH_SWITCH)
   # the NRO by the program target below; verify against the devkitA64 link
   # before assuming the Android -nostdlib behaviour carries over.
 
-  # (Switch v1: the stub presenter, src/switch_present.cpp — the OpenGL presenter needs a GL loader libnx
-  # does not have, and the real presenter is BUILDER-SPEC gap #6. Same GlPresenter interface, so nothing
-  # else changes; the game runs with the software renderer but draws nothing yet.)
+  # (Switch: the real presenter, src/switch_present.cpp — Mesa GLES through SDL3-nx's EGL context. The
+  # software renderer's two 256x192 frames are uploaded as a 2-layer array texture and drawn as quads, the
+  # same ES 3.0 shaders as the phone's presenter. No glad: libnx has no <dlfcn.h>, and glad.c is gated out
+  # of the Switch build — switch-mesa's libGLESv2 provides the entry points as linkable symbols instead.
+  # libGLESv2 is listed BEFORE SDL3::SDL3-static: it needs libglapi, which reaches the link through
+  # SDL3-static's private dependencies. The GLES3 headers and the library are found the same way SDL's own
+  # configure finds EGL — through the toolchain's find root paths (devkitPro portlibs).)
+  find_path(PH_GLES3_INCLUDE GLES3/gl3.h)
+  if(NOT PH_GLES3_INCLUDE)
+    message(FATAL_ERROR "GLES3/gl3.h not found (switch-mesa is required for the Switch presenter)")
+  endif()
+  find_library(PH_GLESv2_LIB GLESv2)
+  if(NOT PH_GLESv2_LIB)
+    message(FATAL_ERROR "libGLESv2 not found (switch-mesa is required for the Switch presenter)")
+  endif()
   add_executable(ph-recomp src/main.cpp src/game_module.cpp src/ph_hooks.cpp src/ph_stick.cpp src/ph_temple.cpp src/ph_text.cpp
                ${PH_HD_FONT_SRC} src/png.cpp src/switch_present.cpp src/menu.cpp src/achievements.cpp)
-  target_include_directories(ph-recomp PRIVATE src ${CMAKE_SOURCE_DIR}/third_party/stb)
+  target_include_directories(ph-recomp PRIVATE src ${CMAKE_SOURCE_DIR}/third_party/stb ${PH_GLES3_INCLUDE})
   target_compile_options(ph-recomp PRIVATE -O2)
-  target_link_libraries(ph-recomp PRIVATE ph_game ntr_runtime ntr_common SDL3::SDL3-static nx)
+  target_link_libraries(ph-recomp PRIVATE ph_game ntr_runtime ntr_common ${PH_GLESv2_LIB} SDL3::SDL3-static nx)
 
   # ---- NRO packaging (Switch only) ----
   # elf2nro + nacptool are fatal if missing (Fulldex's rule: install
@@ -118,9 +130,9 @@ if(PH_SWITCH)
     COMMENT "Packaging ph-recomp.nro"
     VERBATIM)
   add_custom_target(ph-recomp-nro ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/ph-recomp.nro)
-  # Presenter: v1 is the stub (src/switch_present.cpp) — the game runs with the software renderer but draws
-  # nothing yet. The real presenter (spec section 5.2 gap #6: Mesa GLES or a thin deko3d presenter showing
-  # the software renderer's frames) replaces the stub by swapping the one source above back to gl_present.cpp.
+  # Presenter: the real Mesa GLES presenter (src/switch_present.cpp) — the software renderer's frames are
+  # drawn through SDL3-nx's EGL context. If GLES setup fails on hardware, it falls back to no display (the
+  # old stub's behaviour) and the game still boots; the failure is logged to stderr.
   return()
 endif()
 
