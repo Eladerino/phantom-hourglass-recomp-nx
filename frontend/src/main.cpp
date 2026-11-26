@@ -23,6 +23,9 @@
 #ifdef __ANDROID__
 #include <SDL3/SDL_main.h>  // (SDL's Android activity calls SDL_main in libmain.so)
 #endif
+#ifdef __SWITCH__
+#include <switch.h>  // (hidGetTouchScreenStates: the touch ground truth, see the per-frame poll below)
+#endif
 
 #include <algorithm>
 #include <array>
@@ -154,6 +157,11 @@ bool write_file_atomic(const fs::path& p, const std::vector<uint8_t>& data) {
         f.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
         if (!f) return false;
     }
+    // Horizon refuses to rename over an existing file, so the first save (no destination yet) worked and every
+    // later save failed. Remove the old file only after the new one is fully written and closed, so a crash
+    // before this point still leaves the old save intact. (The destination may not exist yet: ignore that.)
+    std::error_code rec;
+    fs::remove(p, rec);
     fs::rename(tmp, p, ec);
     return !ec;
 }
@@ -1444,6 +1452,10 @@ int main(int argc, char** argv) {
     SDL_FingerID finger = 0;
     bool finger_down = false;
     float finger_x = 0, finger_y = 0;  // window pixels
+    bool zl_down = false, zr_down = false;  // (ZL/ZR edge state for the screen binds below)
+    bool menu_minus_down = false, menu_plus_down = false, menu_combo_latched = false;  // (MINUS+PLUS menu chord)
+    bool prev_finger_down = false;  // (tap edge for menu clicks below)
+    int rstick_dir = 0;  // (right-stick function direction: 0 none, 1 up, 2 down, 3 left, 4 right)
 #ifdef __SWITCH__
     // Phase J: one pending finger event, logged once views are computed below (the event handler runs before
     // compute_views, so the in-bottom check has to wait for the rect).
@@ -1521,6 +1533,45 @@ int main(int argc, char** argv) {
                                      : "?",
                                  pad_button_bit(e.gbutton.button));
 #endif
+#ifndef __ANDROID__
+                    // MINUS+PLUS together toggles the overlay menu (the other Switch ports' convention;
+                    // F1/Esc is keyboard-only). Either order, edge-triggered on the second press; the two
+                    // presses are swallowed when the chord fires, so no Start/Select edge reaches the game.
+                    // (The first button's held state can still reach the game for a few frames through the
+                    // per-frame poll before the chord fires — the same property the CTTR menu chord has.)
+                    if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK ||
+                        e.gbutton.button == SDL_GAMEPAD_BUTTON_START) {
+                        if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) menu_minus_down = true;
+                        else menu_plus_down = true;
+                        if (menu_minus_down && menu_plus_down && !menu_combo_latched) {
+                            menu_combo_latched = true;
+                            menu.open = !menu.open;
+                            publish(false);
+                            break;
+                        }
+                    }
+                    if (menu.open) {
+                        // The menu has the gamepad: translate buttons to the scancodes Menu::key reads
+                        // (the menu reads no gamepad state of its own) and keep the game from seeing them.
+                        SDL_Scancode mk = SDL_SCANCODE_UNKNOWN;
+                        switch (e.gbutton.button) {
+                            case SDL_GAMEPAD_BUTTON_DPAD_UP: mk = SDL_SCANCODE_UP; break;
+                            case SDL_GAMEPAD_BUTTON_DPAD_DOWN: mk = SDL_SCANCODE_DOWN; break;
+                            case SDL_GAMEPAD_BUTTON_DPAD_LEFT: mk = SDL_SCANCODE_LEFT; break;
+                            case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: mk = SDL_SCANCODE_RIGHT; break;
+                            case SDL_GAMEPAD_BUTTON_EAST: mk = SDL_SCANCODE_RETURN; break;  // (confirm)
+                            case SDL_GAMEPAD_BUTTON_SOUTH: mk = SDL_SCANCODE_ESCAPE; break;  // (close/back)
+                            case SDL_GAMEPAD_BUTTON_LEFT_STICK: mk = SDL_SCANCODE_TAB; break;  // (next page)
+                            case SDL_GAMEPAD_BUTTON_RIGHT_STICK: mk = SDL_SCANCODE_S; break;  // (save slot)
+                            default: break;
+                        }
+                        if (mk != SDL_SCANCODE_UNKNOWN) {
+                            ph::MenuState ms = menu_state();
+                            menu_done(ms, menu.key(mk, ms));
+                        }
+                        break;
+                    }
+#endif
                     shared.pressed |= pad_button_bit(e.gbutton.button);
                     break;
                 case SDL_EVENT_GAMEPAD_BUTTON_UP:
@@ -1532,6 +1583,9 @@ int main(int argc, char** argv) {
                                      : "?",
                                  pad_button_bit(e.gbutton.button));
 #endif
+                    if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) menu_minus_down = false;
+                    else if (e.gbutton.button == SDL_GAMEPAD_BUTTON_START) menu_plus_down = false;
+                    if (!menu_minus_down && !menu_plus_down) menu_combo_latched = false;
                     break;
 #ifndef __ANDROID__
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -1596,7 +1650,55 @@ int main(int argc, char** argv) {
 
         // Buttons held (the keyboard's only while the menu is closed), fast-forward on the ` key.
         const bool* keys = SDL_GetKeyboardState(nullptr);
-        shared.held = (menu_open ? 0u : keyboard_buttons()) | gamepad_buttons(pad, settings.stick) | ph::pad::held.load();
+        shared.held = (menu_open ? 0u : keyboard_buttons()) |
+                      (menu_open ? 0u : gamepad_buttons(pad, settings.stick)) | ph::pad::held.load();
+        // ZL/ZR are not DS keys (pad_button_bit returns 0 for them) and SDL3 has no gamepad-button enum
+        // for triggers — they arrive as trigger axes (0 released, 32767 pressed; the Switch mapping binds
+        // them to the digital ZL/ZR buttons). Edge-detect the axes once per frame: ZL swaps the shown
+        // screen (the Tab key's path), ZR toggles Both/stacked (the F2 key's path). Gated on the menu
+        // being closed, like the keys; the edge state resets while the menu is open so a press held
+        // through it cannot fire on close. A layout action, not a DS key: nothing goes through
+        // pad_button_bit/shared.pressed. Views recompute from settings.layout every frame below, so the
+        // stylus conversion follows the new bottom rect at once.
+        if (pad && !menu_open) {
+            const bool zl = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16383;
+            const bool zr = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16383;
+            if (zl && !zl_down) {
+                settings.layout = settings.layout == Layout::Bottom ? Layout::Top : Layout::Bottom;
+                publish(false);
+#ifdef __SWITCH__
+                std::fprintf(stderr, "[phasej] ZL: layout=%d\n", (int)settings.layout);
+#endif
+            }
+            if (zr && !zr_down) {
+                settings.layout = settings.layout == Layout::Both ? Layout::Bottom : Layout::Both;
+                publish(false);
+#ifdef __SWITCH__
+                std::fprintf(stderr, "[phasej] ZR: layout=%d\n", (int)settings.layout);
+#endif
+            }
+            zl_down = zl;
+            zr_down = zr;
+        } else {
+            zl_down = zr_down = false;
+        }
+        // The right stick's directions are the only gamepad input nothing else reads, so they carry
+        // the remaining keyboard-only binds: up (held) fast-forwards (the ` key), left (held) closes
+        // the lid (C), right (held) plays the blow sample (N), down (edge) takes a screenshot (F12).
+        // Dominant-axis only, past 0.6, so a diagonal picks one function and a light bump picks none.
+        // All gated on the menu being closed, like the keys. F3/F4/F5/F8/F9 need no binds: smooth, FPS,
+        // save/load state and Continue are all rows of the menu itself once it opens.
+        int rstick_now = 0;
+        if (pad && !menu_open) {
+            const float rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX) / 32767.0f;
+            const float ry = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY) / 32767.0f;
+            if (std::hypot(rx, ry) > 0.6f) {
+                if (std::fabs(ry) >= std::fabs(rx)) rstick_now = ry < 0 ? 1 : 2;
+                else rstick_now = rx < 0 ? 3 : 4;
+            }
+        }
+        if (rstick_now == 2 && rstick_dir != 2) shared.shot_request = true;  // (F12 edge)
+        rstick_dir = rstick_now;
         // The analog stick: the gamepad's left stick or the phone's on-screen one, whichever is pushed farther.
         if (const int want = ph::pad::stick_mode.exchange(-1); want >= 0) settings.stick = want != 0;
         shared.stick_on = settings.stick && !menu_open;
@@ -1610,13 +1712,14 @@ int main(int argc, char** argv) {
             shared.stick_x = int(std::clamp(sx, -1.0f, 1.0f) * 1000.0f);
             shared.stick_y = int(std::clamp(sy, -1.0f, 1.0f) * 1000.0f);
         }
-        shared.fast_forward = !menu_open && keys[SDL_SCANCODE_GRAVE];
+        shared.fast_forward = (!menu_open && keys[SDL_SCANCODE_GRAVE]) || rstick_dir == 1;
         // The microphone: M / stick click provides generated noise for shouting; N plays the blow sample.
         shared.blow = (!menu_open && keys[SDL_SCANCODE_M]) ||
-                      (pad && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) || ph::pad::blow.load();
-        shared.blow_sample = (!menu_open && keys[SDL_SCANCODE_N]) || ph::pad::blow_sample.load();
+                      (!menu_open && pad && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) ||
+                      ph::pad::blow.load();
+        shared.blow_sample = (!menu_open && keys[SDL_SCANCODE_N]) || rstick_dir == 4 || ph::pad::blow_sample.load();
         // The lid: closed while C is held (or the pad's Lid button is on).
-        ntr::set_lid_closed((!menu_open && keys[SDL_SCANCODE_C]) || ph::pad::lid.load());
+        ntr::set_lid_closed((!menu_open && keys[SDL_SCANCODE_C]) || rstick_dir == 3 || ph::pad::lid.load());
         // Choices from the Android app's on-screen pad and menu.
         bool changed = false;
         if (const int want = ph::pad::show.exchange(-1); want >= 0 && want <= 2) settings.layout = Layout(want), changed = true;
@@ -1656,6 +1759,59 @@ int main(int argc, char** argv) {
         if (const int slot = ph::pad::state_save.exchange(0); slot >= 1 && slot <= kSlots) shared.state_save = slot;
         if (const int slot = ph::pad::state_load.exchange(0); slot >= 1 && slot <= kSlots) shared.state_load = slot;
         if (changed) publish(video);
+
+#ifdef __SWITCH__
+        // Touch safety net: SDL3-nx never delivers SDL_EVENT_FINGER_UP (a hands-on session logged 246 finger
+        // downs and zero ups), so finger_down latches TRUE on the first touch and the game sees one endless
+        // held stylus — the title screen, which needs a fresh tap edge, then ignores every later touch.
+        // SDL_GetTouchFingers is no help: SDL's internal finger list is maintained from the same broken
+        // event synthesis (the Switch driver's SDL_SendTouch calls pass `false` as the event-type argument
+        // at the pinned devkitPro SDL 3.4 commit, and its found-flags are set false on match), so it would
+        // lie the same way. Read the real touch state from libnx instead: hidGetTouchScreenStates reads
+        // the HID shared-memory LIFO directly (no hidScanInput needed, no SDL involvement — the same
+        // pattern hbmenu's handleTouch uses, one sample per frame). SDL already activated the touchscreen
+        // (SWITCH_InitTouch calls hidInitializeTouchScreen at window creation), so no init here.
+        // Coordinates are display pixels (0-1279 x 0-719 handheld; docked has no touchscreen, so the
+        // handheld range always applies); scale them to window pixels exactly as the SDL event path does
+        // (the driver normalizes by 1280x720, main.cpp multiplies back by the window size).
+        // The event handlers above stay as-is for the platforms that deliver them; this poll only corrects
+        // the latched state, so a lifted finger clears within one frame and the next tap is a fresh edge.
+        {
+            HidTouchScreenState ts{};
+            if (hidGetTouchScreenStates(&ts, 1) >= 1) {
+                if (finger_down) {
+                    bool still_down = false;
+                    for (int i = 0; i < ts.count; i++) {
+                        if ((SDL_FingerID)(ts.touches[i].finger_id + 1) == finger) {
+                            finger_x = float(ts.touches[i].x) * float(win_pw) / 1280.0f;
+                            finger_y = float(ts.touches[i].y) * float(win_ph) / 720.0f;
+                            still_down = true;
+                            break;
+                        }
+                    }
+                    if (!still_down) finger_down = false;
+                } else if (ts.count > 0) {
+                    // SDL never delivered the DOWN (or delivered it before we looked): acquire the first
+                    // touch as the stylus, the same rule as the event path.
+                    finger = (SDL_FingerID)(ts.touches[0].finger_id + 1);
+                    finger_x = float(ts.touches[0].x) * float(win_pw) / 1280.0f;
+                    finger_y = float(ts.touches[0].y) * float(win_ph) / 720.0f;
+                    finger_down = true;
+                }
+            }
+        }
+#endif
+#ifndef __ANDROID__
+        // A tap while the menu is open clicks it (the same entry as a mouse click): the stylus is
+        // the Switch's only pointer, and the menu's click-only rows (Reset achievements, chips,
+        // cards, tabs) have no keyboard path. Edge-triggered on the tap, so one tap is one click —
+        // a second click path would double-fire Reset's two-tap confirm.
+        if (!testing && menu.open && finger_down && !prev_finger_down) {
+            ph::MenuState ms = menu_state();
+            menu_done(ms, menu.click(finger_x, finger_y, float(win_pw), float(win_ph), ui, ms));
+        }
+#endif
+        prev_finger_down = finger_down;
 
         // The stylus: the mouse's left button or the finger, where the touch screen is shown.
         float mx = 0, my = 0;
