@@ -1044,6 +1044,51 @@ uint32_t gamepad_buttons(SDL_Gamepad* pad, bool stick) {
     return b;
 }
 
+#ifdef __SWITCH__
+// Phase J input instrumentation. Every line goes to stderr (on Switch, the
+// sdmc:/switch/ph-recomp/stderr.log redirect from Phase I). One line per
+// human-speed input event or per boot; nothing is logged per frame, so this
+// cannot spam the log. It only diagnoses the input path; it changes no
+// behavior. (Driver-level fact, Nov 26: SDL3-nx DOES supply a complete
+// Joy-Con gamepad mapping — SWITCH_JoystickGetGamepadMapping in
+// src/joystick/switch/SDL_sysjoystick.c — so "no mapping exists" is already
+// ruled out; these lines show whether the buttons actually arrive.)
+const char* phasej_layout_name(Layout layout) {
+    switch (layout) {
+        case Layout::Top: return "top";
+        case Layout::Both: return "both";
+        default: return "bottom";
+    }
+}
+
+void phasej_log_views(const char* when, int win_w, int win_h, Layout layout, bool stretch, int wide_extra,
+                      int wide_layer) {
+    const ph::Views v = ph::compute_views(float(win_w), float(win_h), layout, stretch, wide_extra, wide_layer);
+    std::fprintf(stderr,
+                 "[phasej] %s: window %dx%d layout=%s stretch=%d top_shown=%d top=(%.0f,%.0f,%.0f,%.0f) "
+                 "bottom_shown=%d bottom=(%.0f,%.0f,%.0f,%.0f)\n",
+                 when, win_w, win_h, phasej_layout_name(layout), stretch ? 1 : 0, v.top_shown ? 1 : 0, v.top.x,
+                 v.top.y, v.top.w, v.top.h, v.bottom_shown ? 1 : 0, v.bottom.x, v.bottom.y, v.bottom.w,
+                 v.bottom.h);
+}
+
+void phasej_log_gamepad(SDL_Gamepad* pad, const char* when) {
+    if (!pad) {
+        std::fprintf(stderr, "[phasej] %s: no gamepad open (SDL_OpenGamepad failed or none added)\n", when);
+        return;
+    }
+    const char* name = SDL_GetGamepadName(pad);
+    char* mapping = SDL_GetGamepadMapping(pad);
+    SDL_Joystick* joy = SDL_GetGamepadJoystick(pad);
+    const int nbuttons = joy ? SDL_GetNumJoystickButtons(joy) : -1;
+    const int naxes = joy ? SDL_GetNumJoystickAxes(joy) : -1;
+    std::fprintf(stderr, "[phasej] %s: id=%u name=%s buttons=%d axes=%d mapping=%s\n", when,
+                 (unsigned)SDL_GetGamepadID(pad), name ? name : "(null)", nbuttons, naxes,
+                 mapping ? mapping : "(null)");
+    if (mapping) SDL_free(mapping);
+}
+#endif
+
 void error_box(const std::string& text, SDL_Window* window = nullptr) {
     std::fprintf(stderr, "%s\n", text.c_str());
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, kTitle, text.c_str(), window);
@@ -1399,6 +1444,20 @@ int main(int argc, char** argv) {
     SDL_FingerID finger = 0;
     bool finger_down = false;
     float finger_x = 0, finger_y = 0;  // window pixels
+#ifdef __SWITCH__
+    // Phase J: one pending finger event, logged once views are computed below (the event handler runs before
+    // compute_views, so the in-bottom check has to wait for the rect).
+    bool phasej_finger_pending = false;
+    int phasej_finger_type = 0;  // 0 = down, 1 = up
+    float phasej_finger_x = 0, phasej_finger_y = 0;
+    {  // Phase J: what screen(s) the player actually sees, once per boot.
+        int boot_w = 1, boot_h = 1;
+        SDL_GetWindowSizeInPixels(window, &boot_w, &boot_h);
+        const int boot_wide_extra = settings.wide ? shared.wide_extra.load() : 0;
+        phasej_log_views("boot", boot_w, boot_h, settings.layout, settings.stretch, boot_wide_extra,
+                         shared.wide_layer.load());
+    }
+#endif
     std::vector<uint32_t> pixels(size_t(kW) * kH * 2);
     while (!shared.game_done) {
 #ifdef __ANDROID__
@@ -1429,16 +1488,51 @@ int main(int argc, char** argv) {
                     if (!finger_down || e.tfinger.fingerID != finger) break;
                     finger_x = e.tfinger.x * float(win_pw);
                     finger_y = e.tfinger.y * float(win_ph);
+#ifdef __SWITCH__
+                    if (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_UP) {
+                        phasej_finger_pending = true;
+                        phasej_finger_type = e.type == SDL_EVENT_FINGER_DOWN ? 0 : 1;
+                        phasej_finger_x = finger_x;
+                        phasej_finger_y = finger_y;
+                    }
+#endif
                     if (e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) finger_down = false;
                     break;
                 }
                 case SDL_EVENT_GAMEPAD_ADDED:
                     if (!pad) pad = SDL_OpenGamepad(e.gdevice.which);
+#ifdef __SWITCH__
+                    phasej_log_gamepad(pad, "gamepad added");
+#endif
                     break;
                 case SDL_EVENT_GAMEPAD_REMOVED:
+#ifdef __SWITCH__
+                    std::fprintf(stderr, "[phasej] gamepad removed: instance=%u was_open=%d\n",
+                                 (unsigned)e.gdevice.which, pad ? 1 : 0);
+#endif
                     if (pad && SDL_GetGamepadID(pad) == e.gdevice.which) SDL_CloseGamepad(pad), pad = nullptr;
                     break;
-                case SDL_EVENT_GAMEPAD_BUTTON_DOWN: shared.pressed |= pad_button_bit(e.gbutton.button); break;
+                case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+#ifdef __SWITCH__
+                    std::fprintf(stderr, "[phasej] button down: raw=%d (%s) mapped=0x%08x\n",
+                                 (int)e.gbutton.button,
+                                 SDL_GetGamepadStringForButton(e.gbutton.button)
+                                     ? SDL_GetGamepadStringForButton(e.gbutton.button)
+                                     : "?",
+                                 pad_button_bit(e.gbutton.button));
+#endif
+                    shared.pressed |= pad_button_bit(e.gbutton.button);
+                    break;
+                case SDL_EVENT_GAMEPAD_BUTTON_UP:
+#ifdef __SWITCH__
+                    std::fprintf(stderr, "[phasej] button up: raw=%d (%s) mapped=0x%08x\n",
+                                 (int)e.gbutton.button,
+                                 SDL_GetGamepadStringForButton(e.gbutton.button)
+                                     ? SDL_GetGamepadStringForButton(e.gbutton.button)
+                                     : "?",
+                                 pad_button_bit(e.gbutton.button));
+#endif
+                    break;
 #ifndef __ANDROID__
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
                     if (testing) break;  // (a test run's input is its script's alone)
@@ -1571,6 +1665,18 @@ int main(int argc, char** argv) {
         const int wide_extra = settings.wide ? shared.wide_extra.load() : 0, wide_layer = shared.wide_layer.load();
         const ph::Views views =
             ph::compute_views(float(win_pw), float(win_ph), settings.layout, settings.stretch, wide_extra, wide_layer);
+#ifdef __SWITCH__
+        if (phasej_finger_pending) {  // Phase J: the deferred finger log (see the event handler above).
+            phasej_finger_pending = false;
+            std::fprintf(stderr,
+                         "[phasej] finger %s: x=%.0f y=%.0f in_bottom=%d bottom_shown=%d "
+                         "bottom=(%.0f,%.0f,%.0f,%.0f)\n",
+                         phasej_finger_type == 0 ? "down" : "up", phasej_finger_x, phasej_finger_y,
+                         views.bottom_shown && views.bottom.contains(phasej_finger_x, phasej_finger_y) ? 1 : 0,
+                         views.bottom_shown ? 1 : 0, views.bottom.x, views.bottom.y, views.bottom.w,
+                         views.bottom.h);
+        }
+#endif
         bool touching = false;
         if (down && views.bottom_shown && views.bottom.contains(mx, my) && views.bottom.w > 0) {
             touching = true;
