@@ -1052,6 +1052,20 @@ void error_box(const std::string& text, SDL_Window* window = nullptr) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef __SWITCH__
+    // Startup errors print to stderr, which goes nowhere on Switch: mirror
+    // it to a file on the card so a silent return to HOME is diagnosable
+    // instead of invisible (Phase I: the first boot exited 1 before any
+    // window existed and left no trace). Best-effort only: the directory
+    // is created first, and the redirect only happens if the file opens,
+    // so a failed redirect leaves stderr as-is and the boot continues.
+    std::error_code log_ec;
+    std::filesystem::create_directories("sdmc:/switch/ph-recomp", log_ec);
+    if (FILE* probe = std::fopen("sdmc:/switch/ph-recomp/stderr.log", "w")) {
+        std::fclose(probe);
+        std::freopen("sdmc:/switch/ph-recomp/stderr.log", "w", stderr);
+    }
+#endif
     // ---- arguments ----
     fs::path rom_path, save_path, data_dir, script_path, module_path = ph::default_module_path();
     uint64_t exit_after = 0;
@@ -1102,6 +1116,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     const fs::path base = SDL_GetBasePath() ? fs::path(SDL_GetBasePath()) : fs::path(".");
+#ifdef __SWITCH__
+    (void)base;  // (unused on Switch: the data dir and ROM path are hardcoded sdmc: paths below)
+#endif
 
     // ---- where settings and saves live: --data-dir, else data\ next to the program (portable.txt), else per user ----
     std::error_code ec;
@@ -1118,10 +1135,25 @@ int main(int argc, char** argv) {
 #endif
     }
     if (rom_path.empty()) {
+#ifdef __SWITCH__
+        // SDL3-nx's SDL_GetBasePath() returns "romfs:/" (hardcoded) and the
+        // NRO is built with no romfs, so base-derived paths never resolve:
+        // the first boot exited 1 on "romfs:/rom/azee.nds" before any window
+        // existed. The ROM is staged at sdmc:/switch/ph-recomp/rom/ (same
+        // layout as the data dir hardcoded just above). The azep fallback
+        // mirrors the PC logic exactly: prefer azep only when it exists and
+        // azee does not.
+        const fs::path switch_rom_dir = "sdmc:/switch/ph-recomp/rom";
+        if (fs::exists(switch_rom_dir / "azep.nds", ec) && !fs::exists(switch_rom_dir / "azee.nds", ec))
+            rom_path = switch_rom_dir / "azep.nds";
+        else
+            rom_path = switch_rom_dir / "azee.nds";
+#else
         if (fs::exists(base / "rom" / "azep.nds", ec) && !fs::exists(base / "rom" / "azee.nds", ec))
             rom_path = base / "rom" / "azep.nds";
         else
             rom_path = base / "rom" / "azee.nds";
+#endif
     }
     const fs::path settings_path = data_dir / "settings.ini";
     ph::temple::set_dir(data_dir);
