@@ -1516,8 +1516,8 @@ int main(int argc, char** argv) {
 #ifdef __SWITCH__
                     std::fprintf(stderr, "[phasej] button down: raw=%d (%s) mapped=0x%08x\n",
                                  (int)e.gbutton.button,
-                                 SDL_GetGamepadStringForButton(e.gbutton.button)
-                                     ? SDL_GetGamepadStringForButton(e.gbutton.button)
+                                 SDL_GetGamepadStringForButton((SDL_GamepadButton)e.gbutton.button)
+                                     ? SDL_GetGamepadStringForButton((SDL_GamepadButton)e.gbutton.button)
                                      : "?",
                                  pad_button_bit(e.gbutton.button));
 #endif
@@ -1527,8 +1527,8 @@ int main(int argc, char** argv) {
 #ifdef __SWITCH__
                     std::fprintf(stderr, "[phasej] button up: raw=%d (%s) mapped=0x%08x\n",
                                  (int)e.gbutton.button,
-                                 SDL_GetGamepadStringForButton(e.gbutton.button)
-                                     ? SDL_GetGamepadStringForButton(e.gbutton.button)
+                                 SDL_GetGamepadStringForButton((SDL_GamepadButton)e.gbutton.button)
+                                     ? SDL_GetGamepadStringForButton((SDL_GamepadButton)e.gbutton.button)
                                      : "?",
                                  pad_button_bit(e.gbutton.button));
 #endif
