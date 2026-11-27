@@ -1006,7 +1006,18 @@ int SDLCALL game_thread(void* p) {
     if (have_gl) {
         std::fprintf(stderr, "video: OpenGL %s%s\n", gl.version().c_str(), gl.gpu_ok() ? "" : " (no GPU renderer)");
         a->host->set_gl(&gl);
-        if (!gl.gpu_ok()) a->options.video = ntr::VideoSettings{}, a->shared->gpu_failed = true;
+        if (!gl.gpu_ok()) {
+            // (No GL renderer: fall back to software — but only the renderer. Resetting the whole
+            // struct here wiped every boot-time video setting video_for() computed: on Switch
+            // gpu_ok() is always false (switch_present.cpp: gpu_ok_ stays false), so interpolate
+            // — and Warp, via stable_textures — never reached the runtime even with interpolate=1
+            // in settings.ini. Phase M proved it: banner on, video: line with no ", 3D interpolated
+            // to 60 fps" suffix, zero gx-interp lines. apply_video already forces scale=1 and
+            // wide_extra=0 for software and ignores texture smoothing unless the renderer is OpenGL,
+            // so keeping the rest is safe.)
+            a->options.video.renderer = ntr::Renderer::Software;
+            a->shared->gpu_failed = true;
+        }
         a->shared->gl_display = 1;
     } else {
 #ifdef __ANDROID__
