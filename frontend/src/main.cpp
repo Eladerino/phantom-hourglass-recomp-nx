@@ -246,6 +246,11 @@ struct Settings {
     int language = kLangAuto;  // DS firmware language: -1 auto (system locale), 0-5 explicit DS code
     bool hd_text = false; // render OBJ dialogue text with an embedded vector TrueType font
     bool frame_time = false;  // log a per-frame time split every 60 frames (a flight toggle, not a menu row)
+    bool interpolate = false;  // 3D at 60 fps: blend the game's 30 Hz scenes (one frame of latency).
+                               // Smooths motion, does not fix speed — with emulation at ~half speed the scenes
+                               // still arrive slow, just blended. No menu row yet: settings.ini key / --interpolate
+                               // first, row after the flight proves it helps. (Upstream: reachable by nobody —
+                               // no menu row, key, or flag sets VideoSettings.interpolate on any platform.)
 };
 
 Settings load_settings(const fs::path& p) {
@@ -276,6 +281,7 @@ Settings load_settings(const fs::path& p) {
         }
         else if (k == "hd_text") s.hd_text = v == "1";
         else if (k == "frame_time") s.frame_time = v == "1";
+        else if (k == "interpolate") s.interpolate = v == "1";
     }
     if (std::find(std::begin(kScales), std::end(kScales), s.scale) == std::end(kScales)) s.scale = 4;
     return s;
@@ -303,6 +309,7 @@ void save_settings(const fs::path& p, const Settings& s) {
     f << "language=" << language_name(s.language) << "\n";
     f << "hd_text=" << (s.hd_text ? 1 : 0) << "\n";
     f << "frame_time=" << (s.frame_time ? 1 : 0) << "\n";
+    f << "interpolate=" << (s.interpolate ? 1 : 0) << "\n";
 }
 
 ntr::VideoSettings video_for(const Settings& s) {
@@ -319,6 +326,9 @@ ntr::VideoSettings video_for(const Settings& s) {
                           : s.textures == 2 ? ntr::TextureSmoothing::Sharp : ntr::TextureSmoothing::Off;
     v.better_polygons = (s.fixes & 1) != 0;  // (seams between polygons in upscaled 3D)
     v.stable_textures = (s.fixes & 2) != 0;  // (textures the DS bends with the view, smeared)
+    v.interpolate = s.interpolate;  // (3D at 60 fps: the geometry engine blends scenes; needs no GPU
+                                    // renderer — apply_video creates gx::Streams for it regardless of renderer.
+                                    // display_rate stays off on Switch: it needs a GL renderer.)
     return v;
 }
 
@@ -1168,6 +1178,7 @@ int main(int argc, char** argv) {
     uint64_t exit_after = 0;
     bool fullscreen_arg = false, unpaced = false, read_only_save = false, continue_arg = false, wide_arg = false, wide21_arg = false;
     bool fps_probe_arg = false, hd_text_arg = false, frame_time_arg = false;
+    bool interpolate_arg = false, gx_probe_arg = false;
     std::string renderer_arg, textures_arg;
     int scale_arg = 0, fixes_arg = -1, language_arg = -2;
     for (int i = 1; i < argc; i++) {
@@ -1188,6 +1199,8 @@ int main(int argc, char** argv) {
         else if (a == "--wide21") wide_arg = wide21_arg = true;
         else if (a == "--fps-probe") fps_probe_arg = true;
         else if (a == "--frame-time") frame_time_arg = true;
+        else if (a == "--interpolate") interpolate_arg = true;
+        else if (a == "--gx-probe") gx_probe_arg = true;
         else if (a == "--textures" && has) textures_arg = argv[++i];
         else if (a == "--fixes" && has) fixes_arg = std::atoi(argv[++i]);
         else if (a == "--language" && has) {
@@ -1352,12 +1365,16 @@ int main(int argc, char** argv) {
     args.options.language = resolve_language(settings.language, is_europe);
     args.options.fps_probe = fps_probe_arg;
     args.options.frame_time = frame_time_arg || settings.frame_time;
+    args.options.gx_probe = gx_probe_arg;  // (with interpolate: the gx-interp counts in stderr.log)
+    if (interpolate_arg) settings.interpolate = true;  // (CLI flag wins over settings.ini, like --frame-time)
     args.options.video = video_for(settings);
     ph::set_wide_extra(args.options.video.wide_extra);
     std::fprintf(stderr, "save: %s (%zu bytes), language: %s\n", save_path.string().c_str(), args.options.save_data.size(),
                  language_name(args.options.language));
     if (args.options.frame_time)
         std::fprintf(stderr, "frame-time: probe on (settings frame_time=1 or --frame-time); one line every 60 frames\n");
+    if (settings.interpolate)
+        std::fprintf(stderr, "interpolate: 3D scenes blended to 60 fps (one frame of latency; smooths motion, does not fix speed)\n");
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_ENTRY_FUNCTION_POINTER, reinterpret_cast<void*>(&game_thread));
     SDL_SetStringProperty(props, SDL_PROP_THREAD_CREATE_NAME_STRING, "game");
