@@ -58,22 +58,45 @@ Menu::Geometry Menu::geometry(const MenuState& s, float win_w, float win_h, floa
     std::vector<Row>& r = g.rows;
     r.resize(kRowCount);
     r[kScreen] = {"Screen", {"Touch", "Top", "Both"}, int(s.layout), {true, true, true}, {}, {}};
+#ifdef __SWITCH__
+    // (Switch: the software renderer only. The GPU renderers are not built, so the row offers
+    // nothing else. The chips used to stay visible but greyed out via gpu_failed, which reads as
+    // a failure; there is no GPU renderer here by design, so there is nothing to fail.)
+    r[kRenderer] = {"Renderer", {"Software"}, 0, {true}, {}, {}};
+#else
     r[kRenderer] = {"Renderer", {"Software", "GPU", "Compute"}, !s.gpu ? 0 : s.compute ? 2 : 1,
                     {true, !s.gpu_failed, !s.gpu_failed}, {}, {}};
+#endif
+#ifdef __SWITCH__
+    // (Switch: the software renderer runs at 1x only. apply_video forces scale to 1, so no
+    // higher resolution is offered.)
+    r[kResolution] = {"Resolution", {"1x"}, 0, {true}, {}, {}};
+#else
     {
         int chosen = 0;
         for (int i = 0; i < 4; i++)
             if (s.gpu && kScales[i] == s.scale) chosen = i + 1;
         r[kResolution] = {"Resolution", {"1x", "2x", "4x", "6x", "8x"}, chosen, {!s.gpu, s.gpu, s.gpu, s.gpu, s.gpu}, {}, {}};
     }
+#endif
+#ifdef __SWITCH__
+    // (Switch: no OpenGL renderer, so FfccSmoothTex is always 0 and texture filtering never applies.)
+    r[kTextures] = {"3D textures", {"Pixels"}, 0, {true}, {}, {}};
+#else
     const bool gl = s.gpu && !s.compute;  // texture filtering is only implemented by the classic OpenGL renderer
     r[kTextures] = {"3D textures (GPU)", {"Pixels", "Smooth", "Sharp"}, gl ? s.textures : 0, {true, gl, gl}, {}, {}};
+#endif
     // (Seams: the GPU renderer's better polygons. Warp: textures the DS bends with the view, cut into a grid.)
     r[kFixes] = {"3D fixes", {"Off", "Seams", "Warp", "Both"}, s.gpu ? s.fixes : s.fixes & 2, {true, s.gpu, true, s.gpu}, {}, {}};
     r[kPicture] = {"Picture", {"Sharp", "Smooth"}, s.smooth ? 1 : 0, {true, true}, {}, {}};
     r[kHdText] = {"HD text", {"Off", "On"}, s.hd_text ? 1 : 0, {true, true}, {}, {}};
     r[kSize] = {"Picture size", {"Fit", "Stretch"}, s.stretch ? 1 : 0, {true, true}, {}, {}};
+#ifdef __SWITCH__
+    // (Switch: wide_extra is forced to 0 without a GPU renderer, so 16:9 is not offered.)
+    r[kWide] = {"Widescreen (test)", {"4:3"}, 0, {true}, {}, {}};
+#else
     r[kWide] = {"Widescreen (test)", {"4:3", "16:9"}, s.wide && s.gpu ? 1 : 0, {true, s.gpu}, {}, {}};
+#endif
     r[kFps] = {"FPS counter", {"Off", "Top L", "Top R", "Bot L", "Bot R"}, s.fps ? s.fps_corner + 1 : 0,
                {true, true, true, true, true}, {}, {}};
     r[kFullscreen] = {"Fullscreen", {"Off", "On"}, s.fullscreen ? 1 : 0, {true, true}, {}, {}};
@@ -153,15 +176,24 @@ MenuResult Menu::choose(int row, int choice, MenuState& s) {
     switch (row) {
         case kScreen: s.layout = Layout(choice); break;
         case kRenderer:
+#ifdef __SWITCH__
+            if (choice != 0) return MenuResult::None;  // (software only: GPU/Compute are not offered)
+#endif
             if (choice >= 1 && s.gpu_failed) return MenuResult::None;
             s.gpu = choice >= 1;
             s.compute = choice == 2;
             break;
         case kResolution:
+#ifdef __SWITCH__
+            if (choice != 0) return MenuResult::None;  // (1x only: the software renderer)
+#endif
             if (!s.gpu || choice == 0) return MenuResult::None;  // (1x is the software renderer's)
             s.scale = kScales[choice - 1];
             break;
         case kTextures:
+#ifdef __SWITCH__
+            if (choice != 0) return MenuResult::None;  // (Pixels only: no texture filtering without a GPU renderer)
+#endif
             if (choice != 0 && (!s.gpu || s.compute)) return MenuResult::None;
             s.textures = choice;
             break;
@@ -173,6 +205,9 @@ MenuResult Menu::choose(int row, int choice, MenuState& s) {
         case kHdText: s.hd_text = choice == 1; break;
         case kSize: s.stretch = choice == 1; break;
         case kWide:
+#ifdef __SWITCH__
+            if (choice != 0) return MenuResult::None;  // (4:3 only: no widescreen without a GPU renderer)
+#endif
             if (choice == 1 && !s.gpu) return MenuResult::None;
             s.wide = choice == 1;
             break;
@@ -466,8 +501,14 @@ void Menu::draw_panel(GlPresenter& gl, const MenuState& s, float win_w, float wi
         for (size_t c = 0; c < row.chips.size(); c++)
             chip(gl, row.chips[c], row.choices[c], int(c) == row.chosen, row.enabled[c], text, ui);
     }
+#ifdef __SWITCH__
+    // (Switch: there is no GPU renderer by design, so this is a platform fact, not a failure.
+    // the "could not start" wording reads as something going wrong.)
+    const char* hint = "Software renderer only (Switch).";
+#else
     const char* hint = s.gpu_failed ? "The GPU renderer could not start: software only."
                                     : "F1 or Esc: close. Arrows: choose. Tab: page.";
+#endif
     gl.text(p.x + pad, win_h - pad - small, small, hint, kHint);
 }
 
