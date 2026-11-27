@@ -1126,15 +1126,12 @@ uint32_t gamepad_buttons(SDL_Gamepad* pad, bool stick) {
         if (SDL_GetGamepadButton(pad, SDL_GamepadButton(i))) b |= pad_button_bit(i);
     if (stick) return b;
     const float x = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
-    float y = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
-#ifdef __SWITCH__
-    // (SDL3-nx reports the left stick's Y inverted: up reads +1, down -1 - so up mapped
-    // to KeyDown and down to KeyUp in D-pad mode. Negate here, once, so up maps to KeyUp.
-    // Same root cause as the Stick/A-tap flip below; the cursor compensates separately
-    // with its own flip, and the right stick reads standard and is untouched. PC SDL
-    // reports up as -Y already, so no change there.)
-    y = -y;
-#endif
+    // (No Y flip here: SDL_GetGamepadAxis LEFTY is standard polarity on the Switch — the
+    // driver negates libnx's positive-up sticks.y (SDL_sysjoystick.c:594, pinned c329016c),
+    // so stick-up reads negative and y < -d below gives KeyUp, like PC SDL. The d6af4a9
+    // "y = -y" rested on the false premise that stick-up reads +1; it mapped up to KeyDown
+    // in D-pad mode. Removed.)
+    const float y = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
     if (std::hypot(x, y) > 0.35f) {  // the nearest of eight directions
         const float d = 0.38268343f * std::hypot(x, y);  // sin(22.5 degrees)
         if (x < -d) b |= ntr::KeyLeft;
@@ -1857,12 +1854,15 @@ int main(int argc, char** argv) {
                 const float v = (mag - kDead) / (1.0f - kDead);
                 const float step = 60.0f * (1.0f + 7.0f * v * v) * cursor_dt / mag;
                 cursor_x = std::clamp(cursor_x + cx * step, 0.0f, 255.0f);
-                // Y is INVERTED on the Switch (Phase M flight, 3x): stick down moves the cursor up.
-                // The pad-movement and analog-stick paths are correct and untouched; only the cursor's
-                // own Y mapping is flipped. Desk could not find a second mechanism in the fork (the
-                // mapping string has no ~, draw and injection are exact inverses, the analog chain has
-                // no negation) — the flight is the arbiter, with Link movement as the control.
-                cursor_y = std::clamp(cursor_y - cy * step, 0.0f, 191.0f);
+                // Y is STANDARD polarity on the Switch: the driver negates the left stick's Y
+                // (devkitPro SDL, pinned c329016c, src/joystick/switch/SDL_sysjoystick.c:594 sends
+                // (Sint16)-state[index].pad.sticks[0].y, so stick-up reads negative, like PC SDL),
+                // and DS y grows downward, so cursor_y + cy * step moves the cursor up on stick-up.
+                // The 074cef6 flip to "- cy" rested on the false premise that SDL3-nx reports
+                // stick-up as positive Y; Brandon proved it backwards live on 2026-11-27 (stick-up
+                // moved the cursor down, title and in-game). Reverted here; the time-based step and
+                // the 100 ms tap hold from 074cef6 are kept.
+                cursor_y = std::clamp(cursor_y + cy * step, 0.0f, 191.0f);
             }
             // A tap is a TIME hold, not a frame count. The old code held a tap for 3 frontend frames,
             // MPH-nx's minimum — but the frontend loop spins at ~400 Hz, so 3 frames was ~7 ms, not the
@@ -1966,17 +1966,14 @@ int main(int argc, char** argv) {
             float sx = float(ph::pad::stick_x.load()) / 1000.0f, sy = float(ph::pad::stick_y.load()) / 1000.0f;
             if (pad && settings.stick) {
                 const float gx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
-                float gy = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
-#ifdef __SWITCH__
-                // (SDL3-nx reports the left stick's Y inverted: up reads +1, down -1. The Stick
-                // therefore walked Link south on up (Phase N control-walk FAIL) and the A-tap
-                // latched the inverted direction. Negate here, once: the Stick, the shared stick
-                // state, and the A-tap latch below all read these same sx/sy, so one flip corrects
-                // all three. The cursor compensates separately with its own flip (cursor_y - cy
-                // * step); the right stick reads standard and is untouched. PC SDL reports up as
-                // -Y already, so no change there.)
-                gy = -gy;
-#endif
+                // (No Y flip here: SDL_GetGamepadAxis LEFTY is standard polarity on the Switch —
+                // the driver negates libnx's positive-up sticks.y (SDL_sysjoystick.c:594, pinned
+                // c329016c), so stick-up reads negative, like PC SDL. The d6af4a9 "gy = -gy" rested
+                // on the false premise that stick-up reads +1; it flipped the Stick south on up
+                // and latched the A-tap backwards, and Brandon proved it live on 2026-11-27. The
+                // Stick, the shared stick state, and the A-tap latch below all read these same
+                // sx/sy, so removing the one negation corrects all three.)
+                const float gy = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
                 if (std::hypot(gx, gy) > std::hypot(sx, sy)) sx = gx, sy = gy;
             }
             shared.stick_x = int(std::clamp(sx, -1.0f, 1.0f) * 1000.0f);
