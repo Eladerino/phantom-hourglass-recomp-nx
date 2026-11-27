@@ -1126,7 +1126,15 @@ uint32_t gamepad_buttons(SDL_Gamepad* pad, bool stick) {
         if (SDL_GetGamepadButton(pad, SDL_GamepadButton(i))) b |= pad_button_bit(i);
     if (stick) return b;
     const float x = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
-    const float y = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
+    float y = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
+#ifdef __SWITCH__
+    // (SDL3-nx reports the left stick's Y inverted: up reads +1, down -1 - so up mapped
+    // to KeyDown and down to KeyUp in D-pad mode. Negate here, once, so up maps to KeyUp.
+    // Same root cause as the Stick/A-tap flip below; the cursor compensates separately
+    // with its own flip, and the right stick reads standard and is untouched. PC SDL
+    // reports up as -Y already, so no change there.)
+    y = -y;
+#endif
     if (std::hypot(x, y) > 0.35f) {  // the nearest of eight directions
         const float d = 0.38268343f * std::hypot(x, y);  // sin(22.5 degrees)
         if (x < -d) b |= ntr::KeyLeft;
@@ -1735,8 +1743,10 @@ int main(int argc, char** argv) {
                         const float lx = float(shared.link_x.load()), ly = float(shared.link_y.load());
                         atap_x = std::clamp(int(std::lround(lx + kAtapDist * atap_dx)), 4, 251);
                         atap_y = std::clamp(int(std::lround(ly + kAtapDist * atap_dy)), 4, 187);
-                        // (100 ms: the same time hold as the cursor tap — 3 emulated frames at ~30 fps,
-                        // past the worst observed inter-read gap, inside a normal human tap.)
+                        // (100 ms minimum, the same time hold as the cursor tap - 3 emulated frames
+                        // at ~30 fps, past the worst observed inter-read gap, inside a normal human
+                        // tap - and extended while A is held, like the cursor tap: Link only walks
+                        // while the stylus is down, so a fixed 100 ms tap never steps (Phase N).)
                         atap_until = SDL_GetTicks() + 100;
                     }
 #endif
@@ -1868,6 +1878,19 @@ int main(int argc, char** argv) {
             if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST)) cursor_tap_until = cursor_now + 100;
         } else {
             cursor_tap_until = 0;
+#ifdef __SWITCH__
+            // A-tap interact: like the cursor tap above, the tap is a TIME hold with a
+            // 100 ms minimum, but it stays asserted while A is held. Link only walks while
+            // the stylus is down, so a fixed 100 ms tap turns him toward the point but never
+            // steps (Phase N step FAIL), and the title screen needs a sustained touch (Phase N
+            // title 50 ms FAIL; a 500 ms held-A works). A quick tap is still a 100 ms tap -
+            // dialogue mashing is unchanged (one advance per press) - and holding A walks Link
+            // to the tap point, where he stops. Only extends an already-asserted tap
+            // (atap_until != 0); the menu-open clear below still cancels it.
+            if (pad && !menu_open && atap_until != 0 &&
+                SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST))
+                atap_until = cursor_now + 100;
+#endif
         }
         shared.cursor_on = cursor_active;
         shared.cursor_x = int(std::lround(cursor_x));
@@ -1943,7 +1966,17 @@ int main(int argc, char** argv) {
             float sx = float(ph::pad::stick_x.load()) / 1000.0f, sy = float(ph::pad::stick_y.load()) / 1000.0f;
             if (pad && settings.stick) {
                 const float gx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
-                const float gy = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
+                float gy = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
+#ifdef __SWITCH__
+                // (SDL3-nx reports the left stick's Y inverted: up reads +1, down -1. The Stick
+                // therefore walked Link south on up (Phase N control-walk FAIL) and the A-tap
+                // latched the inverted direction. Negate here, once: the Stick, the shared stick
+                // state, and the A-tap latch below all read these same sx/sy, so one flip corrects
+                // all three. The cursor compensates separately with its own flip (cursor_y - cy
+                // * step); the right stick reads standard and is untouched. PC SDL reports up as
+                // -Y already, so no change there.)
+                gy = -gy;
+#endif
                 if (std::hypot(gx, gy) > std::hypot(sx, sy)) sx = gx, sy = gy;
             }
             shared.stick_x = int(std::clamp(sx, -1.0f, 1.0f) * 1000.0f);
