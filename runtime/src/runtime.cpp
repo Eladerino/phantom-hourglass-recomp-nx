@@ -87,7 +87,10 @@ RuntimeImpl::RuntimeImpl(std::vector<uint8_t> rom, const GameCode& code, Host& h
 
     set_fast_cart(options.fast_cart);
     melonDS::NDSArgs args;
+#ifndef JIT_ENABLED
+    // (JIT off: the ARM7 stays on the interpreter, exactly as before this spike.)
     args.JIT = std::nullopt;
+#endif
     args.OutputSampleRate = 48000.0;
     {
         // The language the game plays in: the firmware's setting, in both copies of the user data.
@@ -118,6 +121,19 @@ RuntimeImpl::RuntimeImpl(std::vector<uint8_t> rom, const GameCode& code, Host& h
         args.Firmware.UpdateChecksums();
     }
     nds = std::make_unique<RecompNDS>(std::move(args), this);
+
+    // (ARM7 JIT spike: upstream sets NDS::Current in RunFrame, which the fork never calls, and the
+    // Switch fault handler routes through it — a null Current would deref null on the first fastmem
+    // fault. The NDS is advanced only on the game thread (game_thread -> run() -> poll/halt ->
+    // advance()), and Current is thread-local, so one assignment here covers the fault path. Setting
+    // it unconditionally is harmless when the JIT is off: nothing reads it then.)
+    melonDS::NDS::Current = nds.get();
+#ifdef JIT_ENABLED
+    // The JIT's code memory is mapped in the Compiler ctor; a null JitRWStart means the mapping
+    // failed and the JIT must never run — the advance loop falls back to the interpreter instead.
+    jit_ok_ = nds->JIT.JITCompiler.JitRWStart != nullptr;
+    if (!jit_ok_) log("JIT: code memory did not map, ARM7 stays on the interpreter\n");
+#endif
 
     // --frame-time (sys split): melonDS times each fired scheduler event inside RunSystem only while this is set.
     melonDS::FfccFrameTimeEvents = options.frame_time;
@@ -359,8 +375,19 @@ void RuntimeImpl::advance() {
                     ft_dma_calls_++;
                 }
             } else {
+#ifdef JIT_ENABLED
+                // (ARM7 JIT spike: the JIT is usable only if its code memory mapped — checked once
+                // after NDS construction, in jit_ok_. A failed init falls back to the interpreter
+                // here, so a boot that cannot map code memory still plays. The fork-side gate is
+                // required: a no-op CompileBlock would infinite-loop, because ARMv4::Execute<JIT>
+                // calls CompileBlock when LookUpBlock returns null, then loops, and with no block
+                // ever created the ARM7 timestamp would never advance.)
+                if (jit_ok_) n.ARM7.Execute<CPUExecuteMode::JIT>();
+                else n.ARM7.Execute<CPUExecuteMode::Interpreter>();
+#else
                 n.ARM7.Execute<CPUExecuteMode::Interpreter>();
-                // --frame-time: one interpreter step (the JIT candidate: this is the arm7 bucket).
+#endif
+                // --frame-time: one ARM7 step (the JIT candidate when enabled: this is the arm7 bucket).
                 if (options.frame_time) {
                     ft_tick(ft_arm7_s_);
                     ft_arm7_calls_++;

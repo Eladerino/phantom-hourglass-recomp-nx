@@ -171,6 +171,9 @@ private:
     int save_wait_frames_ = 0;
     bool load_requested_ = false;   // at the end of this frame
     bool load_pending_ = false;     // on the root fiber (run())
+#ifdef JIT_ENABLED
+    bool jit_ok_ = false;           // the ARM7 JIT's code memory mapped (checked once after NDS construction)
+#endif
     std::vector<uint8_t> load_data_;
     u32 boot_ctx_ = 0;              // the OSContext a loaded state's OS_LoadContext loads
     std::unordered_set<u32> resume_pcs_;  // where loaded states' threads resume (on the interpreter)
