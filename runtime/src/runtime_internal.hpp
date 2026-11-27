@@ -234,17 +234,29 @@ private:
 
     // --frame-time: per-frame host-time split, summarised every 60 frames (report_frame_time). All seconds in the
     // current 60-frame window; the counts say how many timed segments the window held (advance segments: one
-    // per advance() call, plus one more per frame boundary inside it; gpu3d: one per GPU3D.Run() call), so the
-    // timer overhead itself is auditable (two steady_clock reads per segment, ~20-50 ns each on Switch).
+    // per advance() call, plus one more per frame boundary inside it; gpu3d: one per GPU3D.Run() call; the sys
+    // sub-buckets count their own sections), so the timer overhead itself is auditable (one steady_clock read
+    // per section boundary — the chain in advance() — ~20-50 ns each on Switch).
     // emu: perf_mark_ to end_frame, the same interval --perf reports. advance: time inside advance(), excluding the
     // end_frame() call it makes (the host callbacks and the pace wait are not emulation). gpu3d: time inside
     // GPU3D.Run() (the 3D engine step: GX FIFO plus the software rasterization when a frame completes). audio: the
     // SPU output read plus host.on_audio in end_frame (the SPU synthesis itself is inside advance, in sys).
     // present: host.last_present_ms() per frame (framebuffer copy plus draw/swap). sys and ARM9 are residuals:
-    // sys = advance - gpu3d (ARM7 interpreter, DMA, timers, RunSystem: the 2D scanline stepping and the SPU),
-    // arm9 = emu - advance (the recompiled ARM9 code itself, between system steps).
+    // sys = advance - gpu3d, arm9 = emu - advance (the recompiled ARM9 code itself, between system steps).
+    // The sys split (advance() chains one clock through its sections; each boundary read ends one section and
+    // starts the next, and also accumulates into advance, so advance stays the exact sum of its sections):
+    // arm7: the ARM7 interpreter Execute loop (the JIT candidate). dma: the DMA channel loops, ARM9 channels 0-3
+    // on a DMA9 stall and ARM7 channels 4-7 on a DMA7 stall. tmr: RunTimers(0) + RunTimers(1) plus the RunSystem
+    // scheduler-loop overhead (run_system total minus the fired events it ran). spu: the Event_SPU firings
+    // (SPU::Mix) inside RunSystem, timed per event in melonDS's NDS.cpp (FfccEventTime). gpu2d: the Event_LCD
+    // firings (StartHBlank's DrawScanline/DrawSprites, StartScanline, FinishFrame) the same way. evt: every other
+    // fired event (RTC, Wifi, display FIFO, cart transfers, SPI, Div, Sqrt, DSi). other: advance minus every
+    // timed section — the GXStall bookkeeping, NextTarget, the loop/if overhead and the clock granularity.
     double ft_emu_s_ = 0, ft_advance_s_ = 0, ft_gpu3d_s_ = 0, ft_audio_s_ = 0, ft_present_s_ = 0, ft_max_emu_s_ = 0;
+    double ft_arm7_s_ = 0, ft_dma_s_ = 0, ft_tmr_s_ = 0, ft_runsys_s_ = 0, ft_spu_s_ = 0, ft_gpu2d_s_ = 0,
+           ft_evt_s_ = 0, ft_other_s_ = 0;
     u64 ft_advance_calls_ = 0, ft_gpu3d_calls_ = 0;
+    u64 ft_arm7_calls_ = 0, ft_dma_calls_ = 0, ft_tmr_calls_ = 0, ft_runsys_calls_ = 0, ft_ev_calls_ = 0;
     std::chrono::steady_clock::time_point ft_window_start_{};
     bool ft_header_logged_ = false;
 

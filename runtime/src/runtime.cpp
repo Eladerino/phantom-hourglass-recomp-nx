@@ -28,6 +28,12 @@
 
 namespace melonDS {
 extern int FfccComputeOutputWidth;
+// (frame-time probe, sys split: third_party/CMakeLists.txt patches NDS.cpp to time each fired scheduler event
+// inside RunSystem into these arrays — seconds per event id since boot, read-and-reset by report_frame_time().
+// The flag gates the clock reads, so the probe costs nothing when it is off.)
+extern bool FfccFrameTimeEvents;
+extern double FfccEventTime[];
+extern u64 FfccEventCalls[];
 }
 
 namespace ntr {
@@ -112,6 +118,9 @@ RuntimeImpl::RuntimeImpl(std::vector<uint8_t> rom, const GameCode& code, Host& h
         args.Firmware.UpdateChecksums();
     }
     nds = std::make_unique<RecompNDS>(std::move(args), this);
+
+    // --frame-time (sys split): melonDS times each fired scheduler event inside RunSystem only while this is set.
+    melonDS::FfccFrameTimeEvents = options.frame_time;
 
     melonDS::NDSCart::NDSCartArgs cart_args;
     if (!options.save_data.empty()) {
@@ -293,26 +302,46 @@ void RuntimeImpl::advance() {
     RecompNDS& r = *nds;
     if (u64(cpu.cycles) > n.ARM9Timestamp) n.ARM9Timestamp = u64(cpu.cycles);
     const u32 arm9_stall = melonDS::CPUStop_DMA9 | melonDS::CPUStop_GXStall;
-    // --frame-time: time this system step, pausing around end_frame() below. The host callbacks and the pace
-    // wait inside end_frame are not emulation; counting them here would make ARM9 = emu - advance go negative
-    // by a whole wait. (ft_advance_calls_ counts timed segments: one per advance() call, plus one more per
-    // frame boundary inside it.)
+    // --frame-time (sys split): chain one clock through this call's sections, pausing around end_frame()
+    // below. Each boundary read ends one section and starts the next, so N sections cost N+1 reads instead
+    // of 2N; the delta also accumulates into advance, so advance stays the exact sum of its sections (the
+    // host callbacks and the pace wait inside end_frame are not emulation; counting them here would make
+    // ARM9 = emu - advance go negative by a whole wait). The sections: the DMA9 stall, RunTimers(0),
+    // GPU3D, the ARM7 loop (Execute / DMA7 / RunTimers(1) per iteration), RunSystem, and the tail (other).
+    // (ft_advance_calls_ counts timed segments: one per advance() call, plus one more per frame boundary
+    // inside it.)
     std::chrono::steady_clock::time_point adv_t0;
+    auto ft_tick = [&](double& acc) {
+        const auto now = std::chrono::steady_clock::now();
+        const double d = std::chrono::duration<double>(now - adv_t0).count();
+        acc += d;
+        ft_advance_s_ += d;
+        adv_t0 = now;
+    };
     if (options.frame_time) adv_t0 = std::chrono::steady_clock::now();
     while (n.ARM9Timestamp >= n.ARM9Target || (n.CPUStop & arm9_stall)) {
         if (n.CPUStop & melonDS::CPUStop_GXStall) {
             int32_t cycles = n.GPU.GPU3D.CyclesToRunFor();
             n.ARM9Timestamp = std::min(n.ARM9Target, n.ARM9Timestamp + (u64(cycles) << n.ARM9ClockShift));
+            // (a few nanoseconds of bookkeeping, untimed: it lands in the RunTimers(0) section below)
         } else if (n.CPUStop & melonDS::CPUStop_DMA9) {
             for (int i = 0; i < 4; i++)
                 if (!(n.CPUStop & melonDS::CPUStop_GXStall)) r.dma(i).Run();
+            // --frame-time: the DMA9 stall, timed only when it happens (rare: only while the ARM9 waits on DMA).
+            if (options.frame_time) {
+                ft_tick(ft_dma_s_);
+                ft_dma_calls_++;
+            }
         }
         n.RunTimers(0);
         if (options.frame_time) {
+            ft_tick(ft_tmr_s_);
+            ft_tmr_calls_++;
+        }
+        if (options.frame_time) {
             // The 3D engine step: the GX FIFO plus the software rasterization when a frame completes.
-            const auto g0 = std::chrono::steady_clock::now();
             n.GPU.GPU3D.Run();
-            ft_gpu3d_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - g0).count();
+            ft_tick(ft_gpu3d_s_);
             ft_gpu3d_calls_++;
         } else {
             n.GPU.GPU3D.Run();
@@ -324,19 +353,38 @@ void RuntimeImpl::advance() {
             n.ARM7Target = target;
             if (n.CPUStop & melonDS::CPUStop_DMA7) {
                 for (int i = 4; i < 8; i++) r.dma(i).Run();
+                // --frame-time: the DMA7 stall, timed only when it happens.
+                if (options.frame_time) {
+                    ft_tick(ft_dma_s_);
+                    ft_dma_calls_++;
+                }
             } else {
                 n.ARM7.Execute<CPUExecuteMode::Interpreter>();
+                // --frame-time: one interpreter step (the JIT candidate: this is the arm7 bucket).
+                if (options.frame_time) {
+                    ft_tick(ft_arm7_s_);
+                    ft_arm7_calls_++;
+                }
             }
             n.RunTimers(1);
+            if (options.frame_time) {
+                ft_tick(ft_tmr_s_);
+                ft_tmr_calls_++;
+            }
         }
         r.run_system(target);
+        if (options.frame_time) {
+            ft_tick(ft_runsys_s_);
+            ft_runsys_calls_++;
+        }
         n.CurCPU = 0;
         if (n.GPU.CaptureEnable) probe_capture_ = true;  // cleared by the hardware when the capture ends
 
         if (n.GPU.TotalScanlines != 0) {
             if (options.frame_time) {
-                // Pause the advance timer: end_frame runs the host (audio, present, pace wait), not the system.
-                ft_advance_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - adv_t0).count();
+                // Pause the chain: end_frame runs the host (audio, present, pace wait), not the system.
+                // (the post-RunSystem tail lands in other; the resume read below restarts the chain)
+                ft_tick(ft_other_s_);
                 ft_advance_calls_++;
             }
             end_frame();
@@ -348,7 +396,8 @@ void RuntimeImpl::advance() {
         if ((n.CPUStop & melonDS::CPUStop_GXStall) == 0 && (n.CPUStop & melonDS::CPUStop_DMA9) == 0) break;
     }
     if (options.frame_time) {
-        ft_advance_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - adv_t0).count();
+        // (the loop tail — NextTarget and the break check — lands in other)
+        ft_tick(ft_other_s_);
         ft_advance_calls_++;
     }
     cpu.cycles = int64_t(n.ARM9Timestamp);
@@ -557,19 +606,59 @@ void RuntimeImpl::report_frame_time() {
     // Whatever is left of the wall period is the pace wait (plus the unmeasured gaps: input handling in on_frame,
     // the key latch and the video/cpu-speed application in end_frame's tail — all small).
     const double wait = period_ms - (emu + present + audio);
+    // The sys split: read melonDS's per-event times (seconds since boot, accumulated inside RunSystem) and fold
+    // them into this window, resetting them so the next window starts clean. The events are single-threaded
+    // (game thread only), so the read-and-reset here — between advance() calls, inside end_frame — cannot lose
+    // a firing. gpu2d is Event_LCD (the 2D scanline stepping: StartHBlank's DrawScanline/DrawSprites,
+    // StartScanline, FinishFrame), spu is Event_SPU (SPU::Mix); evt is every other fired event (RTC, Wifi,
+    // display FIFO, cart transfers, SPI, Div, Sqrt, DSi). The scheduler-loop overhead inside RunSystem
+    // (run_system total minus the events it fired) joins tmr with the RunTimers calls.
+    double ev_spu = 0, ev_lcd = 0, ev_rest = 0;
+    u64 ev_calls = 0;
+    for (int i = 0; i < melonDS::Event_MAX; i++) {
+        const double t = melonDS::FfccEventTime[i];
+        const u64 c = melonDS::FfccEventCalls[i];
+        melonDS::FfccEventTime[i] = 0;
+        melonDS::FfccEventCalls[i] = 0;
+        ev_calls += c;
+        if (i == melonDS::Event_SPU) ev_spu += t;
+        else if (i == melonDS::Event_LCD) ev_lcd += t;
+        else ev_rest += t;
+    }
+    ft_spu_s_ += ev_spu;
+    ft_gpu2d_s_ += ev_lcd;
+    ft_evt_s_ += ev_rest;
+    ft_ev_calls_ += ev_calls;
+    // (sys = arm7 + dma + tmr + spu + gpu2d + evt + other, exactly, up to clock granularity: tmr is the
+    // RunTimers calls plus the RunSystem loop overhead, other is the post-RunSystem and loop tails.)
+    const double arm7 = ft_arm7_s_ * 1000.0 / double(kFrames);
+    const double dma = ft_dma_s_ * 1000.0 / double(kFrames);
+    const double tmr = (ft_tmr_s_ + ft_runsys_s_ - ft_spu_s_ - ft_gpu2d_s_ - ft_evt_s_) * 1000.0 / double(kFrames);
+    const double spu = ft_spu_s_ * 1000.0 / double(kFrames);
+    const double gpu2d = ft_gpu2d_s_ * 1000.0 / double(kFrames);
+    const double evt = ft_evt_s_ * 1000.0 / double(kFrames);
+    const double other = ft_other_s_ * 1000.0 / double(kFrames);
     if (!ft_header_logged_) {
         ft_header_logged_ = true;
         log("frame-time: emu=ARM9+3D+sys host time per emulated frame; present=copy+draw+swap; audio=SPU read+queue; "
             "wait=pace wait + unmeasured gaps; budget 16.71 ms/frame at 59.83 Hz\n");
+        log("frame-time: sys=arm7+DMA+timers+SPU+2D+events+other (arm7=ARM7 interpreter, DMA=channel loops, "
+            "timers=RunTimers + RunSystem loop, SPU=SPU::Mix events, 2D=scanline events, events=other events, "
+            "other=stall bookkeeping + NextTarget + loop overhead)\n");
     }
     log("frame-time: frames %llu-%llu (%llu f, %.1f fps): emu %.2f ms/f (arm9 %.2f, gpu3d %.2f, sys %.2f) "
-        "present %.2f audio %.2f wait %.2f | slowest emu %.2f ms | timed adv %llu gpu3d %llu\n",
+        "present %.2f audio %.2f wait %.2f | sys: arm7 %.2f dma %.2f tmr %.2f spu %.2f gpu2d %.2f evt %.2f other %.2f "
+        "| slowest emu %.2f ms | timed adv %llu gpu3d %llu arm7 %llu dma %llu tmr %llu runsys %llu ev %llu\n",
         (unsigned long long)(frames_ - kFrames + 1), (unsigned long long)frames_, kFrames, fps, emu, arm9, gpu3d, sys,
-        present, audio, wait, ft_max_emu_s_ * 1000.0, (unsigned long long)ft_advance_calls_,
-        (unsigned long long)ft_gpu3d_calls_);
+        present, audio, wait, arm7, dma, tmr, spu, gpu2d, evt, other, ft_max_emu_s_ * 1000.0,
+        (unsigned long long)ft_advance_calls_, (unsigned long long)ft_gpu3d_calls_,
+        (unsigned long long)ft_arm7_calls_, (unsigned long long)ft_dma_calls_, (unsigned long long)ft_tmr_calls_,
+        (unsigned long long)ft_runsys_calls_, (unsigned long long)ft_ev_calls_);
     ft_emu_s_ = ft_advance_s_ = ft_gpu3d_s_ = ft_audio_s_ = ft_present_s_ = 0;
     ft_max_emu_s_ = 0;
+    ft_arm7_s_ = ft_dma_s_ = ft_tmr_s_ = ft_runsys_s_ = ft_spu_s_ = ft_gpu2d_s_ = ft_evt_s_ = ft_other_s_ = 0;
     ft_advance_calls_ = ft_gpu3d_calls_ = 0;
+    ft_arm7_calls_ = ft_dma_calls_ = ft_tmr_calls_ = ft_runsys_calls_ = ft_ev_calls_ = 0;
     ft_window_start_ = now;
 }
 

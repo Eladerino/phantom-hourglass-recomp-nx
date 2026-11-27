@@ -227,6 +227,44 @@ ffcc_patch(gpu_src GPU.cpp "void GPU::SyncAllVRAMCaptures()\n{\n"
   "void GPU::SyncAllVRAMCaptures()\n{\n    if (!Rend) return; // ffcc patch: called from the constructor before a renderer exists\n")
 ffcc_write_patched(gpu_src ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/GPU.cpp)
 
+# NDS.cpp: frame-time probe, the sys split (runtime/src/runtime.cpp). RunSystem fires the scheduler's events; the
+# patched loop times each firing by event id into FfccEventTime/FfccEventCalls (seconds, since boot), read-and-reset
+# by the runtime every 60 frames. The flag gates the clock reads, so the probe costs nothing when it is off.
+# Declared in runtime/src/runtime.cpp; set from RuntimeOptions::frame_time at construction. The two dispatch
+# anchors have no leading spaces, so they land on BOTH dispatch sites — RunSystem and RunSystemSleep (one if
+# deeper, and the fork never runs the sleep path, but its SPU/RTC firings belong in the same per-event arrays
+# if it ever does). Indented anchors were tried first and silently matched only the deeper site (a substring
+# match: a 16-space anchor fits inside a 20-space line); the count check below turns any other match count
+# into a loud configure failure instead.
+file(READ ${MS}/NDS.cpp nds_src)
+string(REPLACE "\r\n" "\n" nds_src "${nds_src}")
+ffcc_patch(nds_src NDS.cpp "#include \"NDS.h\"\n"
+  "#include \"NDS.h\"\n#include <chrono> // ffcc patch: steady_clock for the frame-time event timers\n")
+ffcc_patch(nds_src NDS.cpp "namespace melonDS\n{\n"
+  "namespace melonDS\n{\n\n// ffcc patch (frame-time probe): per-event host time inside RunSystem, read by the runtime.\n// FfccFrameTimeEvents gates the clock reads (set by the runtime from RuntimeOptions::frame_time); the arrays\n// accumulate seconds per event id since boot (Event_MAX ids) and are read-and-reset by the runtime every 60\n// frames. When the probe is off the arrays stay zero.\nbool FfccFrameTimeEvents = false;\ndouble FfccEventTime[Event_MAX] = {};\nu64 FfccEventCalls[Event_MAX] = {};\n")
+ffcc_patch(nds_src NDS.cpp "EventFunc func = evt.Funcs[evt.FuncID];\n"
+  "EventFunc func = evt.Funcs[evt.FuncID];\n\n                // ffcc patch (frame-time probe): time each fired event by id.\n                std::chrono::steady_clock::time_point ev_t0;\n                if (FfccFrameTimeEvents) ev_t0 = std::chrono::steady_clock::now();\n")
+ffcc_patch(nds_src NDS.cpp "func(evt.That, evt.Param);\n"
+  "func(evt.That, evt.Param);\n                if (FfccFrameTimeEvents)\n                {\n                    FfccEventTime[i] += std::chrono::duration<double>(std::chrono::steady_clock::now() - ev_t0).count();\n                    FfccEventCalls[i]++;\n                }\n")
+# (exactly two dispatch sites: RunSystem and RunSystemSleep. Any other count means the anchors matched
+# something unexpected — fail the configure rather than ship a half-patched scheduler.)
+set(_ft_n 0)
+set(_ft_rest "${nds_src}")
+while(TRUE)
+  string(FIND "${_ft_rest}" "time each fired event by id" _ft_at)
+  if(_ft_at EQUAL -1)
+    break()
+  endif()
+  math(EXPR _ft_n "${_ft_n} + 1")
+  string(LENGTH "time each fired event by id" _ft_nl)
+  math(EXPR _ft_next "${_ft_at} + ${_ft_nl}")
+  string(SUBSTRING "${_ft_rest}" ${_ft_next} -1 _ft_rest)
+endwhile()
+if(NOT _ft_n EQUAL 2)
+  message(FATAL_ERROR "NDS.cpp frame-time patch applied ${_ft_n} times, want 2 (RunSystem + RunSystemSleep)")
+endif()
+ffcc_write_patched(nds_src ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/NDS.cpp)
+
 set(melonDS_HOMEPAGE_URL "https://melonds.kuribo64.net")
 set(melonDS_VERSION "1.1")
 set(MELONDS_VERSION_SUFFIX "-ffcc")
@@ -251,7 +289,7 @@ add_library(melonds_core STATIC
   ${MS}/DSi_DSP.cpp ${MS}/DSi_I2C.cpp ${MS}/DSi_I2S.cpp ${MS}/DSi_NAND.cpp ${MS}/DSi_NDMA.cpp ${MS}/DSi_NWifi.cpp
   ${MS}/DSi_SD.cpp ${MS}/DSi_SPI_TSC.cpp ${MS}/FATIO.cpp ${MS}/FATStorage.cpp ${MS}/GBACart.cpp
   ${MS}/GBACartMotionPak.cpp ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/GPU.cpp ${MS}/GPU_Soft.cpp ${MS}/GPU2D.cpp ${MS}/GPU2D_Soft.cpp ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/GPU3D.cpp
-  ${MS}/GPU3D_Soft.cpp ${MS}/GPU3D_Texcache.cpp ${MS}/Mic.cpp ${MS}/NDS.cpp ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/NDSCart.cpp ${MS}/ROMList.cpp
+  ${MS}/GPU3D_Soft.cpp ${MS}/GPU3D_Texcache.cpp ${MS}/Mic.cpp ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/NDS.cpp ${CMAKE_CURRENT_BINARY_DIR}/melonds_patched/NDSCart.cpp ${MS}/ROMList.cpp
   ${MS}/FreeBIOS.cpp ${MS}/RTC.cpp ${MS}/Savestate.cpp ${MS}/SPI.cpp ${MS}/SPI_Firmware.cpp ${MS}/SPU.cpp
   ${MS}/Utils.cpp ${MS}/Wifi.cpp ${MS}/WifiAP.cpp
   ${MS}/DSP_HLE/UcodeBase.cpp ${MS}/DSP_HLE/AACUcode.cpp ${MS}/DSP_HLE/G711Ucode.cpp ${MS}/DSP_HLE/GraphicsUcode.cpp
