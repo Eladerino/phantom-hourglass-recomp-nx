@@ -251,6 +251,8 @@ struct Settings {
                                // still arrive slow, just blended. No menu row yet: settings.ini key / --interpolate
                                // first, row after the flight proves it helps. (Upstream: reachable by nobody —
                                // no menu row, key, or flag sets VideoSettings.interpolate on any platform.)
+    bool gx_probe = false;     // log the gx-probe scene-match stats and the gx-interp counts every 60 frames
+                               // (a flight toggle, not a menu row; the gx-interp line needs interpolate on too).
 };
 
 Settings load_settings(const fs::path& p) {
@@ -282,6 +284,7 @@ Settings load_settings(const fs::path& p) {
         else if (k == "hd_text") s.hd_text = v == "1";
         else if (k == "frame_time") s.frame_time = v == "1";
         else if (k == "interpolate") s.interpolate = v == "1";
+        else if (k == "gx_probe") s.gx_probe = v == "1";
     }
     if (std::find(std::begin(kScales), std::end(kScales), s.scale) == std::end(kScales)) s.scale = 4;
     return s;
@@ -310,6 +313,7 @@ void save_settings(const fs::path& p, const Settings& s) {
     f << "hd_text=" << (s.hd_text ? 1 : 0) << "\n";
     f << "frame_time=" << (s.frame_time ? 1 : 0) << "\n";
     f << "interpolate=" << (s.interpolate ? 1 : 0) << "\n";
+    f << "gx_probe=" << (s.gx_probe ? 1 : 0) << "\n";
 }
 
 ntr::VideoSettings video_for(const Settings& s) {
@@ -1365,7 +1369,7 @@ int main(int argc, char** argv) {
     args.options.language = resolve_language(settings.language, is_europe);
     args.options.fps_probe = fps_probe_arg;
     args.options.frame_time = frame_time_arg || settings.frame_time;
-    args.options.gx_probe = gx_probe_arg;  // (with interpolate: the gx-interp counts in stderr.log)
+    args.options.gx_probe = gx_probe_arg || settings.gx_probe;  // (with interpolate: the gx-interp counts in stderr.log)
     if (interpolate_arg) settings.interpolate = true;  // (CLI flag wins over settings.ini, like --frame-time)
     args.options.video = video_for(settings);
     ph::set_wide_extra(args.options.video.wide_extra);
