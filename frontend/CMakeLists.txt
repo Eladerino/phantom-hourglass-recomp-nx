@@ -74,7 +74,11 @@ if(PH_SWITCH)
   target_include_directories(ph_game PRIVATE ${PH_GENERATED_DIR} ${CMAKE_SOURCE_DIR}/runtime/include)
   target_compile_definitions(ph_game PRIVATE NTR_GAME_MODULE=1)
   set_target_properties(ph_game PROPERTIES C_VISIBILITY_PRESET hidden)
-  target_compile_options(ph_game PRIVATE -w -ffreestanding -fno-stack-protector -O1)
+  target_compile_options(ph_game PRIVATE -w -ffreestanding -fno-stack-protector -O2)
+  # (Switch: -O2 for the game module, an A/B against the Phase L probe numbers (emu median 28.74
+  # ms/f, arm9 ~3.4) — upstream's fast build uses -O2 (pc_optimizer.cpp) while the fork kept the
+  # deliberate -O1 default for build time/memory on 65 files / 76 MB of C. If the flight shows no
+  # gain, or the LOQ build gets much slower/heavier, revert this line to -O1.)
   # NOTE: no -nostdlib link option here -- the static archive is linked into
   # the NRO by the program target below; verify against the devkitA64 link
   # before assuming the Android -nostdlib behaviour carries over.
