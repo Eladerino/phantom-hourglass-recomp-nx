@@ -1859,7 +1859,7 @@ int main(int argc, char** argv) {
                 // (Sint16)-state[index].pad.sticks[0].y, so stick-up reads negative, like PC SDL),
                 // and DS y grows downward, so cursor_y + cy * step moves the cursor up on stick-up.
                 // The 074cef6 flip to "- cy" rested on the false premise that SDL3-nx reports
-                // stick-up as positive Y; Brandon proved it backwards live on 2026-11-27 (stick-up
+                // stick-up as positive Y; a live hands-on session proved it backwards on 2026-11-27 (stick-up
                 // moved the cursor down, title and in-game). Reverted here; the time-based step and
                 // the 100 ms tap hold from 074cef6 are kept.
                 cursor_y = std::clamp(cursor_y + cy * step, 0.0f, 191.0f);
@@ -1970,7 +1970,7 @@ int main(int argc, char** argv) {
                 // the driver negates libnx's positive-up sticks.y (SDL_sysjoystick.c:594, pinned
                 // c329016c), so stick-up reads negative, like PC SDL. The d6af4a9 "gy = -gy" rested
                 // on the false premise that stick-up reads +1; it flipped the Stick south on up
-                // and latched the A-tap backwards, and Brandon proved it live on 2026-11-27. The
+                // and latched the A-tap backwards, proven live on 2026-11-27. The
                 // Stick, the shared stick state, and the A-tap latch below all read these same
                 // sx/sy, so removing the one negation corrects all three.)
                 const float gy = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
