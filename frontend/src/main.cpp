@@ -1537,12 +1537,14 @@ int main(int argc, char** argv) {
     bool prev_finger_down = false;  // (tap edge for menu clicks below)
 #ifdef __SWITCH__
     // The gamepad touch cursor: L3 toggles it (the event handler below); the left stick moves it and A taps
-    // at it. Position in DS pixels, centre by default, kept across toggles. cursor_tap_frames counts the
-    // frames the current tap has been asserted — a tap shorter than the game's once-per-frame touch read is
-    // held for 3 frames (MPH-nx's minimum), so it cannot be missed between two on_frame reads.
+    // at it. Position in DS pixels, centre by default, kept across toggles. cursor_tap_until is the ms
+    // timestamp a tap stays asserted until — a TIME hold, not a frame count (the frontend loop spins at
+    // ~400 Hz, so the old 3-frame minimum was ~7 ms, not ~50 ms, and the game reads touch once per
+    // emulated frame). cursor_last_ticks is the previous frontend iteration, for the time-based rate.
     bool cursor_on = false;
     float cursor_x = 128.0f, cursor_y = 96.0f;
-    int cursor_tap_frames = 0;
+    uint32_t cursor_tap_until = 0;
+    uint32_t cursor_last_ticks = 0;
 #endif
     int rstick_dir = 0;  // (right-stick function direction: 0 none, 1 up, 2 down, 3 left, 4 right)
     bool rstick_was_closed = true;  // (the menu was closed last frame: the screenshot edge below must not fire
@@ -1619,7 +1621,7 @@ int main(int argc, char** argv) {
                         // The pad the cursor belonged to is gone: turn the cursor off, or it would sit
                         // visible with no input left to move it or toggle it off.
                         cursor_on = false;
-                        cursor_tap_frames = 0;
+                        cursor_tap_until = 0;
 #endif
                     }
                     break;
@@ -1656,7 +1658,7 @@ int main(int argc, char** argv) {
                     // Clicking it does not conflict with the stick's axes, which keep moving the cursor.
                     if (e.gbutton.button == SDL_GAMEPAD_BUTTON_LEFT_STICK && !menu.open) {
                         cursor_on = !cursor_on;
-                        cursor_tap_frames = 0;
+                        cursor_tap_until = 0;
                         std::fprintf(stderr, "[phasej] touch cursor %s at %d,%d\n", cursor_on ? "on" : "off",
                                      (int)cursor_x, (int)cursor_y);
                         break;
@@ -1771,30 +1773,51 @@ int main(int argc, char** argv) {
         // the cursor, not Link, and A is the tap, not KeyA), the right-stick functions and the analog-stick
         // stylus are gated off below, and the button-down events are swallowed above.
         const bool cursor_active = cursor_on && !menu_open;
+        // Time since the previous frontend iteration, in seconds (0 on the first one). The frontend loop
+        // spins at ~400 Hz (a 2 ms delay plus input work), so the cursor rate is measured in px/s from the
+        // real elapsed time, not in px/iteration. Clamped at 50 ms so a hitch cannot teleport the cursor.
+        // Updated unconditionally, so re-enabling the cursor after it was off does not see a stale gap.
+        const uint32_t cursor_now = SDL_GetTicks();
+        const float cursor_dt = cursor_last_ticks == 0
+            ? 0.0f : std::min((cursor_now - cursor_last_ticks) / 1000.0f, 0.05f);
+        cursor_last_ticks = cursor_now;
         if (cursor_active && pad) {
-            // MPH-nx's cursor curve, verbatim (same 256x192 screen, same stick, same job): dead zone 0.15,
-            // then an accelerating step — 1 px/frame just past the dead zone for fine aiming, 8 px/frame
-            // at full deflection, so the cursor crosses the screen in about half a second.
+            // MPH-nx's cursor curve, verbatim in SHAPE (same 256x192 screen, same stick, same job): dead
+            // zone 0.15, then an accelerating rate — 60 px/s just past the dead zone for fine aiming,
+            // 480 px/s at full deflection, so the cursor crosses the screen in about half a second. The
+            // old code applied the same (1 + 7v^2) as px per frontend ITERATION, which at the loop's
+            // ~400 Hz was ~7x the 60 Hz the desk estimate assumed (measured ~1,270 px/s at magnitude
+            // 0.61; 3.05 px/iter x 416 iters/s = 1,269). At 60 Hz this reduces to the old step exactly;
+            // at any other loop rate the px/s is the same.
             const float cx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
             const float cy = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
             const float mag = std::hypot(cx, cy);
             constexpr float kDead = 0.15f;
             if (mag > kDead) {
                 const float v = (mag - kDead) / (1.0f - kDead);
-                const float step = (1.0f + 7.0f * v * v) / mag;
+                const float step = 60.0f * (1.0f + 7.0f * v * v) * cursor_dt / mag;
                 cursor_x = std::clamp(cursor_x + cx * step, 0.0f, 255.0f);
-                cursor_y = std::clamp(cursor_y + cy * step, 0.0f, 191.0f);
+                // Y is INVERTED on the Switch (Phase M flight, 3x): stick down moves the cursor up.
+                // The pad-movement and analog-stick paths are correct and untouched; only the cursor's
+                // own Y mapping is flipped. Desk could not find a second mechanism in the fork (the
+                // mapping string has no ~, draw and injection are exact inverses, the analog chain has
+                // no negation) — the flight is the arbiter, with Link movement as the control.
+                cursor_y = std::clamp(cursor_y - cy * step, 0.0f, 191.0f);
             }
-            // A held is a held stylus (level, like a finger). A tap shorter than the game's once-per-frame
-            // touch read is held for 3 frames, MPH-nx's minimum: the frontend loop and the game thread run
-            // on different threads, and a tap asserted between two on_frame reads would never be seen.
-            // Three host frames (~50 ms) always covers at least one emulated-frame read, even at the ~30
-            // fps the game runs at in its heaviest scenes.
-            if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST)) ++cursor_tap_frames;
-            else if (cursor_tap_frames > 0 && cursor_tap_frames < 3) ++cursor_tap_frames;
-            else cursor_tap_frames = 0;
+            // A tap is a TIME hold, not a frame count. The old code held a tap for 3 frontend frames,
+            // MPH-nx's minimum — but the frontend loop spins at ~400 Hz, so 3 frames was ~7 ms, not the
+            // ~50 ms the design assumed, and the game reads touch once per emulated frame (~30 ms on
+            // title, up to ~50 ms in heavy 3D, spikes to ~90 ms). A tap asserted for ~7 ms can fall
+            // entirely between two on_frame reads and never be seen (Phase M's 50 ms click). While A is
+            // held the deadline keeps extending, so a held A is a held stylus; on release the tap stays
+            // asserted for 100 ms — 3 emulated frames at ~30 fps, MPH-nx's rule counted in the clock
+            // that matters — which exceeds the worst observed inter-read gap (~92 ms) and stays inside
+            // a normal human tap (80-150 ms). Latching on the first iteration that sees A down also
+            // closes a short injection pulse: the touch duration no longer depends on the observed
+            // press duration.
+            if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST)) cursor_tap_until = cursor_now + 100;
         } else {
-            cursor_tap_frames = 0;
+            cursor_tap_until = 0;
         }
         shared.cursor_on = cursor_active;
         shared.cursor_x = int(std::lround(cursor_x));
@@ -2010,7 +2033,7 @@ int main(int argc, char** argv) {
         // already set down/mx/my, and this only fills in when there is no finger. The bottom rect is the
         // gate too: with layout Top the bottom screen is not shown, so the cursor cannot tap — it is not
         // drawn either (Host::draw checks the same condition).
-        if (!finger_down && cursor_tap_frames > 0 && views.bottom_shown) {
+        if (!finger_down && SDL_GetTicks() < cursor_tap_until && views.bottom_shown) {
             down = true;
             mx = views.bottom.x + cursor_x / 256.0f * views.bottom.w;
             my = views.bottom.y + cursor_y / 192.0f * views.bottom.h;
