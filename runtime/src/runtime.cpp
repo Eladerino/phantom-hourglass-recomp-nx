@@ -293,6 +293,12 @@ void RuntimeImpl::advance() {
     RecompNDS& r = *nds;
     if (u64(cpu.cycles) > n.ARM9Timestamp) n.ARM9Timestamp = u64(cpu.cycles);
     const u32 arm9_stall = melonDS::CPUStop_DMA9 | melonDS::CPUStop_GXStall;
+    // --frame-time: time this system step, pausing around end_frame() below. The host callbacks and the pace
+    // wait inside end_frame are not emulation; counting them here would make ARM9 = emu - advance go negative
+    // by a whole wait. (ft_advance_calls_ counts timed segments: one per advance() call, plus one more per
+    // frame boundary inside it.)
+    std::chrono::steady_clock::time_point adv_t0;
+    if (options.frame_time) adv_t0 = std::chrono::steady_clock::now();
     while (n.ARM9Timestamp >= n.ARM9Target || (n.CPUStop & arm9_stall)) {
         if (n.CPUStop & melonDS::CPUStop_GXStall) {
             int32_t cycles = n.GPU.GPU3D.CyclesToRunFor();
@@ -302,7 +308,15 @@ void RuntimeImpl::advance() {
                 if (!(n.CPUStop & melonDS::CPUStop_GXStall)) r.dma(i).Run();
         }
         n.RunTimers(0);
-        n.GPU.GPU3D.Run();
+        if (options.frame_time) {
+            // The 3D engine step: the GX FIFO plus the software rasterization when a frame completes.
+            const auto g0 = std::chrono::steady_clock::now();
+            n.GPU.GPU3D.Run();
+            ft_gpu3d_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - g0).count();
+            ft_gpu3d_calls_++;
+        } else {
+            n.GPU.GPU3D.Run();
+        }
 
         u64 target = n.ARM9Timestamp >> n.ARM9ClockShift;
         n.CurCPU = 1;
@@ -320,12 +334,22 @@ void RuntimeImpl::advance() {
         if (n.GPU.CaptureEnable) probe_capture_ = true;  // cleared by the hardware when the capture ends
 
         if (n.GPU.TotalScanlines != 0) {
+            if (options.frame_time) {
+                // Pause the advance timer: end_frame runs the host (audio, present, pace wait), not the system.
+                ft_advance_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - adv_t0).count();
+                ft_advance_calls_++;
+            }
             end_frame();
             n.GPU.StartFrame();
+            if (options.frame_time) adv_t0 = std::chrono::steady_clock::now();  // (resume)
         }
         n.ARM9Target = r.next_target() << n.ARM9ClockShift;
         // While stalled the ARM9 makes no progress, so time jumps to the next event.
         if ((n.CPUStop & melonDS::CPUStop_GXStall) == 0 && (n.CPUStop & melonDS::CPUStop_DMA9) == 0) break;
+    }
+    if (options.frame_time) {
+        ft_advance_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - adv_t0).count();
+        ft_advance_calls_++;
     }
     cpu.cycles = int64_t(n.ARM9Timestamp);
     cpu.next_event = int64_t(n.ARM9Target);
@@ -336,12 +360,24 @@ void RuntimeImpl::end_frame() {
     frames_++;
     const auto emulated_until = std::chrono::steady_clock::now();
 
+    // --frame-time: the emulation interval ends here (the same interval --perf reports: the end of the last
+    // end_frame to now). The SPU read and on_audio below are audio time, not emulation.
+    if (options.frame_time && perf_mark_ != std::chrono::steady_clock::time_point{}) {
+        const double emu_s = std::chrono::duration<double>(emulated_until - perf_mark_).count();
+        ft_emu_s_ += emu_s;
+        ft_max_emu_s_ = std::max(ft_max_emu_s_, emu_s);
+        if (ft_window_start_ == std::chrono::steady_clock::time_point{}) ft_window_start_ = emulated_until;
+    }
+    const auto audio_t0 =
+        options.frame_time ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     int avail = n.SPU.GetOutputSize();
     if (avail > 0) {
         audio_buf_.resize(size_t(avail) * 2);
         int got = n.SPU.ReadOutput(audio_buf_.data(), avail);
         if (got > 0) host.on_audio(audio_buf_.data(), size_t(got));
     }
+    if (options.frame_time)
+        ft_audio_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - audio_t0).count();
 
     if (options.perf) report_perf();
     if (options.fps_probe) probe_frame();
@@ -399,6 +435,8 @@ void RuntimeImpl::end_frame() {
         quit_ = true;
         fiber_switch(fibers_[current_fiber_].fiber, root_fiber_);
     }
+    // --frame-time: the present time for this frame (Host::draw, measured by the host during on_frame).
+    if (options.frame_time) ft_present_s_ += host.last_present_ms() / 1000.0;
     // The input the host set during on_frame, which ends when the next frame is due: the freshest sample for the
     // frame about to run.
     // (Half a second without the game reading the keys counts as a read, so that no button can stay stuck.)
@@ -422,6 +460,7 @@ void RuntimeImpl::end_frame() {
         pending_cpu_speed_ = 0;
     }
     perf_mark_ = std::chrono::steady_clock::now();  // the frontend's frame pacing is not emulation time
+    if (options.frame_time && frames_ % 60 == 0) report_frame_time();
     age_save_request();
     if (load_requested_) {
         // A save state replaces every guest thread's host stack, this one's too: run() loads it.
@@ -491,6 +530,47 @@ void RuntimeImpl::report_perf() {
     perf_max_s_ = 0;
     perf_calls_mark_ = interp_calls_;
     perf_steps_mark_ = interp_steps_;
+}
+
+// --frame-time: one line every 60 frames splitting the frame's host time into ARM9 emulation, software 3D
+// rasterization, other system work, presenting, and audio. The split is exact by construction: emu is the
+// --perf interval (end of the last end_frame to this one), advance is the time inside advance() with end_frame()
+// paused out, gpu3d is the time inside GPU3D.Run(), so arm9 = emu - advance and sys = advance - gpu3d are
+// residuals. A residual a few microseconds negative is clock granularity, not a bug: the timer reads sit inside
+// both the outer and the inner interval, so their cost cancels in the subtraction.
+void RuntimeImpl::report_frame_time() {
+    constexpr u64 kFrames = 60;
+    const auto now = std::chrono::steady_clock::now();
+    const double window_s = ft_window_start_ == std::chrono::steady_clock::time_point{}
+                                ? 0
+                                : std::chrono::duration<double>(now - ft_window_start_).count();
+    // The first window starts at the second frame's end_frame (the first has no perf_mark_ yet), so its fps is
+    // ~one frame short; later windows run print to print, exactly 60 frames apart.
+    const double period_ms = window_s > 0 ? window_s * 1000.0 / double(kFrames) : 0;
+    const double fps = window_s > 0 ? double(kFrames) / window_s : 0;
+    const double emu = ft_emu_s_ * 1000.0 / double(kFrames);
+    const double gpu3d = ft_gpu3d_s_ * 1000.0 / double(kFrames);
+    const double sys = (ft_advance_s_ - ft_gpu3d_s_) * 1000.0 / double(kFrames);
+    const double arm9 = (ft_emu_s_ - ft_advance_s_) * 1000.0 / double(kFrames);
+    const double present = ft_present_s_ * 1000.0 / double(kFrames);
+    const double audio = ft_audio_s_ * 1000.0 / double(kFrames);
+    // Whatever is left of the wall period is the pace wait (plus the unmeasured gaps: input handling in on_frame,
+    // the key latch and the video/cpu-speed application in end_frame's tail — all small).
+    const double wait = period_ms - (emu + present + audio);
+    if (!ft_header_logged_) {
+        ft_header_logged_ = true;
+        log("frame-time: emu=ARM9+3D+sys host time per emulated frame; present=copy+draw+swap; audio=SPU read+queue; "
+            "wait=pace wait + unmeasured gaps; budget 16.71 ms/frame at 59.83 Hz\n");
+    }
+    log("frame-time: frames %llu-%llu (%llu f, %.1f fps): emu %.2f ms/f (arm9 %.2f, gpu3d %.2f, sys %.2f) "
+        "present %.2f audio %.2f wait %.2f | slowest emu %.2f ms | timed adv %llu gpu3d %llu\n",
+        (unsigned long long)(frames_ - kFrames + 1), (unsigned long long)frames_, kFrames, fps, emu, arm9, gpu3d, sys,
+        present, audio, wait, ft_max_emu_s_ * 1000.0, (unsigned long long)ft_advance_calls_,
+        (unsigned long long)ft_gpu3d_calls_);
+    ft_emu_s_ = ft_advance_s_ = ft_gpu3d_s_ = ft_audio_s_ = ft_present_s_ = 0;
+    ft_max_emu_s_ = 0;
+    ft_advance_calls_ = ft_gpu3d_calls_ = 0;
+    ft_window_start_ = now;
 }
 
 void RuntimeImpl::poll() {

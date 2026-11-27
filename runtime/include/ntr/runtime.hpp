@@ -97,6 +97,10 @@ public:
     virtual ~Host() = default;
     // Called once per emulated frame. Return false to quit.
     virtual bool on_frame(const Frame& frame) = 0;
+    // Host time spent presenting the last frame, in ms (Host::draw: the framebuffer copy plus the presenter,
+    // including the swap); 0 when the host draws elsewhere (the phone's fallback draws on the main thread).
+    // The runtime reads it after on_frame returns, for the frame-time probe (RuntimeOptions::frame_time).
+    virtual double last_present_ms() const { return 0; }
     // Interleaved stereo samples at 48000 Hz produced during the last frame.
     virtual void on_audio(const int16_t* samples, size_t frames) {}
     virtual void on_save(const uint8_t* data, size_t size) {}
@@ -114,6 +118,7 @@ struct RuntimeOptions {
     bool trace_threads = false;
     bool perf = false;         // log emulation cost and interpreter use every 60 frames
     bool fps_probe = false;    // log how often the game makes a new 3D frame, display capture and 3D screen use
+    bool frame_time = false;   // log a per-frame time split (ARM9 / 3D / system / present / audio) every 60 frames
     bool gx_probe = false;     // log how well each 3D scene's GX command stream matches the previous one
     bool gx_check = false;     // replay each 3D scene's GX commands and check the polygon list comes out the same
     uint64_t gx_dump_at_frame = 0;  // write the first 3D scene swapped in at or after this frame to gx_scene.txt

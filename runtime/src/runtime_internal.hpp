@@ -151,6 +151,7 @@ private:
     void end_frame();
     void apply_video(VideoSettings settings);
     void report_perf();
+    void report_frame_time();
     void trace_cart_write(u32 addr, u32 value, u32 size);
     bool irq_pending() const;
     void take_irq();
@@ -230,6 +231,22 @@ private:
     u64 halted_cycles_ = 0, probe_cycles_mark_ = 0, probe_halted_mark_ = 0;  // ARM9 cycles spent halted (all time)
     int probe_new3d_ = 0, probe_capture_frames_ = 0, probe_top_ = 0, probe_swaps_ = 0;
     bool probe_last_top_ = false;
+
+    // --frame-time: per-frame host-time split, summarised every 60 frames (report_frame_time). All seconds in the
+    // current 60-frame window; the counts say how many timed segments the window held (advance segments: one
+    // per advance() call, plus one more per frame boundary inside it; gpu3d: one per GPU3D.Run() call), so the
+    // timer overhead itself is auditable (two steady_clock reads per segment, ~20-50 ns each on Switch).
+    // emu: perf_mark_ to end_frame, the same interval --perf reports. advance: time inside advance(), excluding the
+    // end_frame() call it makes (the host callbacks and the pace wait are not emulation). gpu3d: time inside
+    // GPU3D.Run() (the 3D engine step: GX FIFO plus the software rasterization when a frame completes). audio: the
+    // SPU output read plus host.on_audio in end_frame (the SPU synthesis itself is inside advance, in sys).
+    // present: host.last_present_ms() per frame (framebuffer copy plus draw/swap). sys and ARM9 are residuals:
+    // sys = advance - gpu3d (ARM7 interpreter, DMA, timers, RunSystem: the 2D scanline stepping and the SPU),
+    // arm9 = emu - advance (the recompiled ARM9 code itself, between system steps).
+    double ft_emu_s_ = 0, ft_advance_s_ = 0, ft_gpu3d_s_ = 0, ft_audio_s_ = 0, ft_present_s_ = 0, ft_max_emu_s_ = 0;
+    u64 ft_advance_calls_ = 0, ft_gpu3d_calls_ = 0;
+    std::chrono::steady_clock::time_point ft_window_start_{};
+    bool ft_header_logged_ = false;
 
     // GX command streams: frame interpolation, --gx-probe, --gx-check.
     std::unique_ptr<gx::Streams> gx_;

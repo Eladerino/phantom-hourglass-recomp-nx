@@ -230,13 +230,22 @@ struct Settings {
     int slot = 1;         // the save state slot chosen (1-12)
     int fps_corner = 1;   // the FPS counter's corner of the picture (0 top left, 1 top right, 2 bottom left, 3 bottom right)
     bool stretch = false; // the picture stretched over the whole window (else the DS's shape, with bars)
-    bool stick = false;   // the analog stick moves Link (a gamepad's left stick, the phone's on-screen stick)
+    // The analog stick moves Link (a gamepad's left stick, the phone's on-screen stick). On Switch it is on by
+    // default: there is no keyboard to open the menu with, so a fresh install would otherwise have no way to move
+    // Link with the left stick at all. The menu row still lets the player pick D-pad mode; a saved settings.ini
+    // (stick=0 or stick=1) always wins over this default.
+#ifdef __SWITCH__
+    bool stick = true;
+#else
+    bool stick = false;
+#endif
     bool wide = false;    // widescreen, 16:9 (a test; GPU and Compute renderers)
     int wide_mode = 1;    // 1: 16:9, 2: 21:9
     int textures = 0;     // the 3D's textures with the GPU renderer: 0 the DS's pixels, 1 smooth, 2 sharp
     int fixes = 0;        // 3D fixes, bits: 1 fewer seams (GPU renderer's better polygons), 2 stable textures (no warp)
     int language = kLangAuto;  // DS firmware language: -1 auto (system locale), 0-5 explicit DS code
     bool hd_text = false; // render OBJ dialogue text with an embedded vector TrueType font
+    bool frame_time = false;  // log a per-frame time split every 60 frames (a flight toggle, not a menu row)
 };
 
 Settings load_settings(const fs::path& p) {
@@ -266,6 +275,7 @@ Settings load_settings(const fs::path& p) {
             if (parsed >= kLangAuto) s.language = parsed;
         }
         else if (k == "hd_text") s.hd_text = v == "1";
+        else if (k == "frame_time") s.frame_time = v == "1";
     }
     if (std::find(std::begin(kScales), std::end(kScales), s.scale) == std::end(kScales)) s.scale = 4;
     return s;
@@ -292,6 +302,7 @@ void save_settings(const fs::path& p, const Settings& s) {
     f << "fixes=" << s.fixes << "\n";
     f << "language=" << language_name(s.language) << "\n";
     f << "hd_text=" << (s.hd_text ? 1 : 0) << "\n";
+    f << "frame_time=" << (s.frame_time ? 1 : 0) << "\n";
 }
 
 ntr::VideoSettings video_for(const Settings& s) {
@@ -492,19 +503,31 @@ public:
     // background (not in scripted test runs).
     void set_resume(bool continue_at_start, bool resume) { continue_ = continue_at_start, resume_ = resume; }
     void set_gl(ph::GlPresenter* gl) { gl_ = gl; }
+    double last_present_ms() const override { return last_present_ms_; }
 
     bool on_frame(const ntr::Frame& frame) override {
         const uint64_t f = ++frames_;
         if (rt_) s_.achievements.tick(*rt_, SDL_GetTicks());
         last_ = frame;
         have_last_ = true;
+        // --frame-time: the present time for this frame (the copy plus draw/swap); the runtime reads it after
+        // on_frame returns. Timed whether the probe is on or not: one steady_clock pair a frame, ~100 ns
+        // against a 16.71 ms budget, and the value is only used when the probe is on.
+        const auto present_t0 = std::chrono::steady_clock::now();
+#ifndef __SWITCH__
+        // (On Switch the presenter draws from the frame's own pointers via read_screens, and the only
+        // other reader of Shared::frame is the Android fallback, not compiled on Switch: this per-frame
+        // 384 KiB copy + mutex is dead work there. FPS analysis, Nov 26 2026.)
         if (frame.top && frame.bottom) {
             std::lock_guard<std::mutex> lock(s_.frame_mutex);
             std::memcpy(s_.frame.data(), frame.top, sizeof(uint32_t) * kW * kH);
             std::memcpy(s_.frame.data() + kW * kH, frame.bottom, sizeof(uint32_t) * kW * kH);
             s_.frame_new = true;
         }
+#endif
         if (gl_ && !s_.paused.load()) draw(frame);  // (in the background the window may be gone)
+        last_present_ms_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - present_t0).count();
 
         // Input for the next frame: the player's, plus any script steps active then.
         // (A scripted run takes only the script's input, so it does the same thing whatever happens in the window.)
@@ -917,6 +940,7 @@ private:
     bool resume_pending_ = false;  // the resume state was asked for while another state was being saved
     std::vector<uint32_t> thumb_;        // the picture of the state being saved
     uint64_t frames_ = 0;
+    double last_present_ms_ = 0;  // (present time of the last frame, for the frame-time probe)
     uint64_t video_asked_ = 0;  // the frame of the last renderer change asked for
     uint64_t fps_since_ = 0, fps_frames_ = 0;  // (the FPS counter)
     std::chrono::steady_clock::time_point next_{};
@@ -1123,7 +1147,7 @@ int main(int argc, char** argv) {
     fs::path rom_path, save_path, data_dir, script_path, module_path = ph::default_module_path();
     uint64_t exit_after = 0;
     bool fullscreen_arg = false, unpaced = false, read_only_save = false, continue_arg = false, wide_arg = false, wide21_arg = false;
-    bool fps_probe_arg = false, hd_text_arg = false;
+    bool fps_probe_arg = false, hd_text_arg = false, frame_time_arg = false;
     std::string renderer_arg, textures_arg;
     int scale_arg = 0, fixes_arg = -1, language_arg = -2;
     for (int i = 1; i < argc; i++) {
@@ -1143,6 +1167,7 @@ int main(int argc, char** argv) {
         else if (a == "--wide") wide_arg = true;
         else if (a == "--wide21") wide_arg = wide21_arg = true;
         else if (a == "--fps-probe") fps_probe_arg = true;
+        else if (a == "--frame-time") frame_time_arg = true;
         else if (a == "--textures" && has) textures_arg = argv[++i];
         else if (a == "--fixes" && has) fixes_arg = std::atoi(argv[++i]);
         else if (a == "--language" && has) {
@@ -1306,10 +1331,13 @@ int main(int argc, char** argv) {
     args.options.console_name = "Link";
     args.options.language = resolve_language(settings.language, is_europe);
     args.options.fps_probe = fps_probe_arg;
+    args.options.frame_time = frame_time_arg || settings.frame_time;
     args.options.video = video_for(settings);
     ph::set_wide_extra(args.options.video.wide_extra);
     std::fprintf(stderr, "save: %s (%zu bytes), language: %s\n", save_path.string().c_str(), args.options.save_data.size(),
                  language_name(args.options.language));
+    if (args.options.frame_time)
+        std::fprintf(stderr, "frame-time: probe on (settings frame_time=1 or --frame-time); one line every 60 frames\n");
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_ENTRY_FUNCTION_POINTER, reinterpret_cast<void*>(&game_thread));
     SDL_SetStringProperty(props, SDL_PROP_THREAD_CREATE_NAME_STRING, "game");
@@ -1456,6 +1484,8 @@ int main(int argc, char** argv) {
     bool menu_minus_down = false, menu_plus_down = false, menu_combo_latched = false;  // (MINUS+PLUS menu chord)
     bool prev_finger_down = false;  // (tap edge for menu clicks below)
     int rstick_dir = 0;  // (right-stick function direction: 0 none, 1 up, 2 down, 3 left, 4 right)
+    bool rstick_was_closed = true;  // (the menu was closed last frame: the screenshot edge below must not fire
+                                    // on the frame the menu closes while the stick is already held down)
 #ifdef __SWITCH__
     // Phase J: one pending finger event, logged once views are computed below (the event handler runs before
     // compute_views, so the in-bottom check has to wait for the rect).
@@ -1656,10 +1686,10 @@ int main(int argc, char** argv) {
         // for triggers — they arrive as trigger axes (0 released, 32767 pressed; the Switch mapping binds
         // them to the digital ZL/ZR buttons). Edge-detect the axes once per frame: ZL swaps the shown
         // screen (the Tab key's path), ZR toggles Both/stacked (the F2 key's path). Gated on the menu
-        // being closed, like the keys; the edge state resets while the menu is open so a press held
-        // through it cannot fire on close. A layout action, not a DS key: nothing goes through
-        // pad_button_bit/shared.pressed. Views recompute from settings.layout every frame below, so the
-        // stylus conversion follows the new bottom rect at once.
+        // being closed, like the keys; the edge state keeps tracking the physical triggers while
+        // the menu is open, so a press held through it cannot fire on close. A layout action, not
+        // a DS key: nothing goes through pad_button_bit/shared.pressed. Views recompute from
+        // settings.layout every frame below, so the stylus conversion follows the new bottom rect at once.
         if (pad && !menu_open) {
             const bool zl = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16383;
             const bool zr = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16383;
@@ -1680,7 +1710,12 @@ int main(int argc, char** argv) {
             zl_down = zl;
             zr_down = zr;
         } else {
-            zl_down = zr_down = false;
+            // Keep the edge state tracking the physical triggers while gated (menu open,
+            // or no pad), so a trigger held across the menu closing does NOT fire on the
+            // first frame after close. Clearing the state here would do the opposite: a
+            // still-held trigger would read as a fresh press the moment the gate lifts.
+            zl_down = pad && SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16383;
+            zr_down = pad && SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16383;
         }
         // The right stick's directions are the only gamepad input nothing else reads, so they carry
         // the remaining keyboard-only binds: up (held) fast-forwards (the ` key), left (held) closes
@@ -1697,8 +1732,9 @@ int main(int argc, char** argv) {
                 else rstick_now = rx < 0 ? 3 : 4;
             }
         }
-        if (rstick_now == 2 && rstick_dir != 2) shared.shot_request = true;  // (F12 edge)
+        if (rstick_now == 2 && rstick_dir != 2 && rstick_was_closed) shared.shot_request = true;  // (F12 edge)
         rstick_dir = rstick_now;
+        rstick_was_closed = !menu_open;
         // The analog stick: the gamepad's left stick or the phone's on-screen one, whichever is pushed farther.
         if (const int want = ph::pad::stick_mode.exchange(-1); want >= 0) settings.stick = want != 0;
         shared.stick_on = settings.stick && !menu_open;
@@ -1789,7 +1825,16 @@ int main(int argc, char** argv) {
                             break;
                         }
                     }
-                    if (!still_down) finger_down = false;
+                    if (!still_down) {
+                        finger_down = false;
+                        // The lift is real (HID says the finger is gone) but SDL never delivers
+                        // the FINGER_UP event, so log it through the Phase J deferred log (the
+                        // same line a delivered up would print) instead of clearing silently.
+                        phasej_finger_pending = true;
+                        phasej_finger_type = 1;
+                        phasej_finger_x = finger_x;
+                        phasej_finger_y = finger_y;
+                    }
                 } else if (ts.count > 0) {
                     // SDL never delivered the DOWN (or delivered it before we looked): acquire the first
                     // touch as the stylus, the same rule as the event path.
