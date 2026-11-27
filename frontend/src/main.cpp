@@ -401,6 +401,8 @@ struct Shared {
     std::atomic<uint32_t> pressed{0};  // went down since the game thread last took them (taps shorter than a frame)
     std::atomic<bool> touching{false};
     std::atomic<int> touch_x{0}, touch_y{0};
+    std::atomic<bool> cursor_on{false};  // the gamepad touch cursor is on and the menu is closed (L3 toggles it)
+    std::atomic<int> cursor_x{128}, cursor_y{96};  // where it is, DS pixels (0-255, 0-191)
     std::atomic<bool> fast_forward{false};
     std::atomic<bool> blow{false};  // the player's "blow into the mic" input is held
     std::atomic<bool> blow_sample{false};
@@ -855,6 +857,24 @@ private:
             gl_->text(x, float(h) - size - 20 * ui, size, note, 0xFFFFFFFF);
         }
         s_.achievements.draw_toast(*gl_, w, h, ui, SDL_GetTicks());
+#ifdef __SWITCH__
+        // The gamepad touch cursor: a crosshair on the bottom screen, drawn by the frontend with the same
+        // gl_->fill quads as the FPS counter's box — no framebuffer surgery (the presenter draws from the
+        // frame's own pointers via read_screens, so editing the frame is not an option) and no presenter
+        // change. Black halo + white core, visible on light and dark screens (MPH-nx's draw_cursor, same
+        // shape). Four quads a frame, the same order as the FPS box; unmeasurable against the ~1.8 ms
+        // present time. Only while the cursor is on and the menu is closed (it suspends while the menu is
+        // open) and only where the bottom screen is shown (layout Top shows no bottom screen to aim at).
+        if (s_.cursor_on.load() && !menu_open && v.bottom_shown) {
+            const float cx = v.bottom.x + float(s_.cursor_x.load()) / 256.0f * v.bottom.w;
+            const float cy = v.bottom.y + float(s_.cursor_y.load()) / 192.0f * v.bottom.h;
+            const float r = std::max(8.0f, v.bottom.w / 40.0f), t = std::max(2.0f, v.bottom.w / 240.0f);
+            gl_->fill({cx - r - 1, cy - t, 2 * r + 3, 2 * t + 1}, 0xFF000000);
+            gl_->fill({cx - t, cy - r - 1, 2 * t + 1, 2 * r + 3}, 0xFF000000);
+            gl_->fill({cx - r, cy - t / 2, 2 * r + 1, t}, 0xFFFFFFFF);
+            gl_->fill({cx - t / 2, cy - r, t, 2 * r + 1}, 0xFFFFFFFF);
+        }
+#endif
 #ifndef __ANDROID__
         if (menu_open) {
             // The slots' pictures, read again when a slot changed.
@@ -1483,6 +1503,15 @@ int main(int argc, char** argv) {
     bool zl_down = false, zr_down = false;  // (ZL/ZR edge state for the screen binds below)
     bool menu_minus_down = false, menu_plus_down = false, menu_combo_latched = false;  // (MINUS+PLUS menu chord)
     bool prev_finger_down = false;  // (tap edge for menu clicks below)
+#ifdef __SWITCH__
+    // The gamepad touch cursor: L3 toggles it (the event handler below); the left stick moves it and A taps
+    // at it. Position in DS pixels, centre by default, kept across toggles. cursor_tap_frames counts the
+    // frames the current tap has been asserted — a tap shorter than the game's once-per-frame touch read is
+    // held for 3 frames (MPH-nx's minimum), so it cannot be missed between two on_frame reads.
+    bool cursor_on = false;
+    float cursor_x = 128.0f, cursor_y = 96.0f;
+    int cursor_tap_frames = 0;
+#endif
     int rstick_dir = 0;  // (right-stick function direction: 0 none, 1 up, 2 down, 3 left, 4 right)
     bool rstick_was_closed = true;  // (the menu was closed last frame: the screenshot edge below must not fire
                                     // on the frame the menu closes while the stick is already held down)
@@ -1552,7 +1581,15 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "[phasej] gamepad removed: instance=%u was_open=%d\n",
                                  (unsigned)e.gdevice.which, pad ? 1 : 0);
 #endif
-                    if (pad && SDL_GetGamepadID(pad) == e.gdevice.which) SDL_CloseGamepad(pad), pad = nullptr;
+                    if (pad && SDL_GetGamepadID(pad) == e.gdevice.which) {
+                        SDL_CloseGamepad(pad), pad = nullptr;
+#ifdef __SWITCH__
+                        // The pad the cursor belonged to is gone: turn the cursor off, or it would sit
+                        // visible with no input left to move it or toggle it off.
+                        cursor_on = false;
+                        cursor_tap_frames = 0;
+#endif
+                    }
                     break;
                 case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
 #ifdef __SWITCH__
@@ -1580,6 +1617,23 @@ int main(int argc, char** argv) {
                             break;
                         }
                     }
+#ifdef __SWITCH__
+                    // L3 toggles the touch cursor (menu closed only: while the menu is open L3 is Tab, the
+                    // menu-nav translation below). L3 is free in-game — pad_button_bit returns 0 for it and
+                    // nothing else reads it — and Phase K proved the press is delivered (raw=7, mapped 0).
+                    // Clicking it does not conflict with the stick's axes, which keep moving the cursor.
+                    if (e.gbutton.button == SDL_GAMEPAD_BUTTON_LEFT_STICK && !menu.open) {
+                        cursor_on = !cursor_on;
+                        cursor_tap_frames = 0;
+                        std::fprintf(stderr, "[phasej] touch cursor %s at %d,%d\n", cursor_on ? "on" : "off",
+                                     (int)cursor_x, (int)cursor_y);
+                        break;
+                    }
+                    // While the cursor is on, the pad is a mouse, not a controller: no button down reaches
+                    // the game as a DS key (A is the tap button, not KeyA). The chord above still opens the
+                    // menu, and L3 above still toggles the cursor off.
+                    if (cursor_on && !menu.open) break;
+#endif
                     if (menu.open) {
                         // The menu has the gamepad: translate buttons to the scancodes Menu::key reads
                         // (the menu reads no gamepad state of its own) and keep the game from seeing them.
@@ -1678,10 +1732,49 @@ int main(int argc, char** argv) {
             }
         }
 
+#ifdef __SWITCH__
+        // The touch cursor, per frame: the left stick moves it, A taps at it. It suspends while the menu
+        // is open — the menu owns the pad then — and resumes where it was when the menu closes. While it is
+        // on, the pad is a mouse: the held poll below contributes no gamepad buttons (the left stick moves
+        // the cursor, not Link, and A is the tap, not KeyA), the right-stick functions and the analog-stick
+        // stylus are gated off below, and the button-down events are swallowed above.
+        const bool cursor_active = cursor_on && !menu_open;
+        if (cursor_active && pad) {
+            // MPH-nx's cursor curve, verbatim (same 256x192 screen, same stick, same job): dead zone 0.15,
+            // then an accelerating step — 1 px/frame just past the dead zone for fine aiming, 8 px/frame
+            // at full deflection, so the cursor crosses the screen in about half a second.
+            const float cx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
+            const float cy = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
+            const float mag = std::hypot(cx, cy);
+            constexpr float kDead = 0.15f;
+            if (mag > kDead) {
+                const float v = (mag - kDead) / (1.0f - kDead);
+                const float step = (1.0f + 7.0f * v * v) / mag;
+                cursor_x = std::clamp(cursor_x + cx * step, 0.0f, 255.0f);
+                cursor_y = std::clamp(cursor_y + cy * step, 0.0f, 191.0f);
+            }
+            // A held is a held stylus (level, like a finger). A tap shorter than the game's once-per-frame
+            // touch read is held for 3 frames, MPH-nx's minimum: the frontend loop and the game thread run
+            // on different threads, and a tap asserted between two on_frame reads would never be seen.
+            // Three host frames (~50 ms) always covers at least one emulated-frame read, even at the ~30
+            // fps the game runs at in its heaviest scenes.
+            if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST)) ++cursor_tap_frames;
+            else if (cursor_tap_frames > 0 && cursor_tap_frames < 3) ++cursor_tap_frames;
+            else cursor_tap_frames = 0;
+        } else {
+            cursor_tap_frames = 0;
+        }
+        shared.cursor_on = cursor_active;
+        shared.cursor_x = int(std::lround(cursor_x));
+        shared.cursor_y = int(std::lround(cursor_y));
+#else
+        const bool cursor_active = false;
+#endif
+
         // Buttons held (the keyboard's only while the menu is closed), fast-forward on the ` key.
         const bool* keys = SDL_GetKeyboardState(nullptr);
         shared.held = (menu_open ? 0u : keyboard_buttons()) |
-                      (menu_open ? 0u : gamepad_buttons(pad, settings.stick)) | ph::pad::held.load();
+                      (menu_open || cursor_active ? 0u : gamepad_buttons(pad, settings.stick)) | ph::pad::held.load();
         // ZL/ZR are not DS keys (pad_button_bit returns 0 for them) and SDL3 has no gamepad-button enum
         // for triggers — they arrive as trigger axes (0 released, 32767 pressed; the Switch mapping binds
         // them to the digital ZL/ZR buttons). Edge-detect the axes once per frame: ZL swaps the shown
@@ -1721,10 +1814,10 @@ int main(int argc, char** argv) {
         // the remaining keyboard-only binds: up (held) fast-forwards (the ` key), left (held) closes
         // the lid (C), right (held) plays the blow sample (N), down (edge) takes a screenshot (F12).
         // Dominant-axis only, past 0.6, so a diagonal picks one function and a light bump picks none.
-        // All gated on the menu being closed, like the keys. F3/F4/F5/F8/F9 need no binds: smooth, FPS,
+        // All gated on the menu being closed and the cursor being off, like the keys. F3/F4/F5/F8/F9 need no binds: smooth, FPS,
         // save/load state and Continue are all rows of the menu itself once it opens.
         int rstick_now = 0;
-        if (pad && !menu_open) {
+        if (pad && !menu_open && !cursor_active) {
             const float rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX) / 32767.0f;
             const float ry = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY) / 32767.0f;
             if (std::hypot(rx, ry) > 0.6f) {
@@ -1737,7 +1830,7 @@ int main(int argc, char** argv) {
         rstick_was_closed = !menu_open;
         // The analog stick: the gamepad's left stick or the phone's on-screen one, whichever is pushed farther.
         if (const int want = ph::pad::stick_mode.exchange(-1); want >= 0) settings.stick = want != 0;
-        shared.stick_on = settings.stick && !menu_open;
+        shared.stick_on = settings.stick && !menu_open && !cursor_active;
         {
             float sx = float(ph::pad::stick_x.load()) / 1000.0f, sy = float(ph::pad::stick_y.load()) / 1000.0f;
             if (pad && settings.stick) {
@@ -1751,7 +1844,7 @@ int main(int argc, char** argv) {
         shared.fast_forward = (!menu_open && keys[SDL_SCANCODE_GRAVE]) || rstick_dir == 1;
         // The microphone: M / stick click provides generated noise for shouting; N plays the blow sample.
         shared.blow = (!menu_open && keys[SDL_SCANCODE_M]) ||
-                      (!menu_open && pad && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) ||
+                      (!menu_open && !cursor_active && pad && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) ||
                       ph::pad::blow.load();
         shared.blow_sample = (!menu_open && keys[SDL_SCANCODE_N]) || rstick_dir == 4 || ph::pad::blow_sample.load();
         // The lid: closed while C is held (or the pad's Lid button is on).
@@ -1876,6 +1969,19 @@ int main(int argc, char** argv) {
                          views.bottom_shown && views.bottom.contains(phasej_finger_x, phasej_finger_y) ? 1 : 0,
                          views.bottom_shown ? 1 : 0, views.bottom.x, views.bottom.y, views.bottom.w,
                          views.bottom.h);
+        }
+#endif
+#ifdef __SWITCH__
+        // The touch cursor is the stylus while its tap is asserted: its position lives in DS pixels, so
+        // map it to window pixels through the bottom rect — the inverse of ph::to_ds below (which then
+        // maps it straight back, HUD moves included). A real finger still wins: the finger branch above
+        // already set down/mx/my, and this only fills in when there is no finger. The bottom rect is the
+        // gate too: with layout Top the bottom screen is not shown, so the cursor cannot tap — it is not
+        // drawn either (Host::draw checks the same condition).
+        if (!finger_down && cursor_tap_frames > 0 && views.bottom_shown) {
+            down = true;
+            mx = views.bottom.x + cursor_x / 256.0f * views.bottom.w;
+            my = views.bottom.y + cursor_y / 192.0f * views.bottom.h;
         }
 #endif
         bool touching = false;
