@@ -59,6 +59,7 @@ bool Stick::touch_for(const ntr::Runtime& rt, float x, float y, int& tx, int& ty
             }
             link_x_ = pick == 1 ? ax : bx;
             link_y_ = pick == 1 ? ay : by;
+            have_link_ = true;
         }
     }
 
@@ -73,6 +74,13 @@ bool Stick::touch_for(const ntr::Runtime& rt, float x, float y, int& tx, int& ty
     ty = std::clamp(int(std::lround(py)), 4, 187);
     holding_ = true;
     last_tx_ = tx, last_ty_ = ty;
+    return true;
+}
+
+bool Stick::link_pos(float& x, float& y) const {
+    if (!have_link_) return false;
+    x = link_x_;
+    y = link_y_;
     return true;
 }
 

@@ -422,6 +422,11 @@ struct Shared {
     std::atomic<bool> blow_sample{false};
     std::atomic<bool> stick_on{false};       // the analog stick moves Link (ph_stick.hpp)
     std::atomic<int> stick_x{0}, stick_y{0};  // where it is, -1000..1000 (y down)
+    std::atomic<int> link_x{128}, link_y{96};  // where Link is on the touch screen, DS pixels, as tracked by the
+                                                // analog stick (ph_stick.hpp) — written by the game thread, read
+                                                // by the main thread for the A-tap interact
+    std::atomic<bool> link_valid{false};  // (the stick has tracked Link at least once; before that the x/y above
+                                          // are just the centre default and must not be used)
     // Widescreen as drawn: the extra pixels each side of the wide screen (0: none), and its layer (0 top, 1 bottom).
     std::atomic<int> wide_extra{0}, wide_layer{1};
     std::mutex hud_mutex;  // the HUD clusters moved to the edges in the frame shown (ph::to_ds)
@@ -560,6 +565,17 @@ public:
             const float sy = touching ? 0.0f : float(s_.stick_y.load()) / 1000.0f;
             int x = 0, y = 0;
             if (stick_.touch_for(*rt_, sx, sy, x, y)) touching = true, tx = x, ty = y;
+        }
+        {  // (publish Link's tracked position for the main thread's A-tap interact: the Stick only updates it
+           // while the analog stick drives Link, so it freezes at the last position when he stops — which is
+           // where he is. Published every frame, valid or not; link_valid says whether the values are real or
+           // still the centre default.)
+            float lx = 0.0f, ly = 0.0f;
+            if (stick_.link_pos(lx, ly)) {
+                s_.link_x = int(std::lround(lx));
+                s_.link_y = int(std::lround(ly));
+                s_.link_valid = true;
+            }
         }
         bool quit = false;
         for (const ScriptStep& st : script_) {
@@ -1545,6 +1561,22 @@ int main(int argc, char** argv) {
     float cursor_x = 128.0f, cursor_y = 96.0f;
     uint32_t cursor_tap_until = 0;
     uint32_t cursor_last_ticks = 0;
+    // A-tap interact (an A press is also a stylus tap in front of Link): the latched direction Link last
+    // walked — the stick's direction is the movement direction by construction (touch_for holds the stylus
+    // at Link + stick direction * r and the game walks Link toward it), so it is also the direction he
+    // faces — and the tap itself: its point in DS pixels and the ms timestamp it stays asserted until.
+    // A TIME hold, not a frame count, like the cursor tap: the frontend loop spins at ~400 Hz, so a
+    // 3-frame hold would be ~7 ms and could fall entirely between two on_frame reads (the game reads
+    // touch once per emulated frame, worst observed inter-read gap ~92 ms). 100 ms covers 3 emulated
+    // frames at ~30 fps and stays inside a normal human tap (80-150 ms). The tap point is computed at
+    // the press edge from the latched direction and the Stick's Link position (shared.link_x/y), so it
+    // needs no per-frame work.
+    float atap_dx = 0.0f, atap_dy = 0.0f;
+    bool atap_dir = false;  // (a direction has been latched since boot)
+    int atap_x = 128, atap_y = 96;
+    uint32_t atap_until = 0;
+    constexpr float kAtapDist = 24.0f;  // (tap distance from Link, DS pixels: one tile and a half — past the
+                                        // game's 20-pixel dead zone around Link, still on the adjacent tile)
 #endif
     int rstick_dir = 0;  // (right-stick function direction: 0 none, 1 up, 2 down, 3 left, 4 right)
     bool rstick_was_closed = true;  // (the menu was closed last frame: the screenshot edge below must not fire
@@ -1690,6 +1722,24 @@ int main(int argc, char** argv) {
                         break;
                     }
 #endif
+#ifdef __SWITCH__
+                    // A-tap interact: an A press is also a short stylus tap one tile-and-a-half in front of
+                    // Link (see the per-frame latch and the stylus section below). The game advances dialogue
+                    // and starts conversations on stylus tap only — KeyA alone is ignored there — so without
+                    // this, docked play means walk up, L3 the cursor on, aim, tap, for every line. This reaches
+                    // here only with the menu closed and the cursor off (the blocks above break first), so it
+                    // cannot double-fire with the cursor tap or menu nav. KeyA still reaches the game through
+                    // shared.pressed below, as before; the tap is in addition to it, not instead of it.
+                    if (!testing && e.gbutton.button == SDL_GAMEPAD_BUTTON_EAST && atap_dir &&
+                        shared.link_valid.load()) {
+                        const float lx = float(shared.link_x.load()), ly = float(shared.link_y.load());
+                        atap_x = std::clamp(int(std::lround(lx + kAtapDist * atap_dx)), 4, 251);
+                        atap_y = std::clamp(int(std::lround(ly + kAtapDist * atap_dy)), 4, 187);
+                        // (100 ms: the same time hold as the cursor tap — 3 emulated frames at ~30 fps,
+                        // past the worst observed inter-read gap, inside a normal human tap.)
+                        atap_until = SDL_GetTicks() + 100;
+                    }
+#endif
                     shared.pressed |= pad_button_bit(e.gbutton.button);
                     break;
                 case SDL_EVENT_GAMEPAD_BUTTON_UP:
@@ -1825,6 +1875,9 @@ int main(int argc, char** argv) {
 #else
         const bool cursor_active = false;
 #endif
+#ifdef __SWITCH__
+        if (menu_open) atap_until = 0;  // (an A-tap cannot outlive the menu opening)
+#endif
 
         // Buttons held (the keyboard's only while the menu is closed), fast-forward on the ` key.
         const bool* keys = SDL_GetKeyboardState(nullptr);
@@ -1895,6 +1948,17 @@ int main(int argc, char** argv) {
             }
             shared.stick_x = int(std::clamp(sx, -1.0f, 1.0f) * 1000.0f);
             shared.stick_y = int(std::clamp(sy, -1.0f, 1.0f) * 1000.0f);
+#ifdef __SWITCH__
+            // A-tap interact: remember the direction Link is walking, for the A press to tap in front of
+            // him. Latched only while the analog stick is actually driving him (stick_on: Analog mode, menu
+            // closed, cursor off) and past the stick's 0.22 dead zone. The D-pad cannot move Link on the
+            // clean dump, so there is no D-pad direction to latch — in D-pad mode the A-tap never fires.
+            if (shared.stick_on.load() && std::hypot(sx, sy) > 0.22f) {
+                const float m = std::hypot(sx, sy);
+                atap_dx = sx / m, atap_dy = sy / m;
+                atap_dir = true;
+            }
+#endif
         }
         shared.fast_forward = (!menu_open && keys[SDL_SCANCODE_GRAVE]) || rstick_dir == 1;
         // The microphone: M / stick click provides generated noise for shouting; N plays the blow sample.
@@ -2037,6 +2101,18 @@ int main(int argc, char** argv) {
             down = true;
             mx = views.bottom.x + cursor_x / 256.0f * views.bottom.w;
             my = views.bottom.y + cursor_y / 192.0f * views.bottom.h;
+        }
+        // A-tap interact: the A press edge (above) asserted a 100 ms stylus tap in front of Link.
+        // Lowest priority: a real finger wins (the !finger_down gate, same as the cursor block) and the
+        // cursor tap above wins (the SDL_GetTicks() >= cursor_tap_until gate — the A edge never sets
+        // atap_until while the cursor is on, but L3 within the 100 ms window could otherwise overwrite
+        // the cursor's tap). The analog stick (game thread) only acts when nothing is touching, so the
+        // tap also beats it while asserted, and the stick resumes after.
+        if (!finger_down && SDL_GetTicks() < atap_until && SDL_GetTicks() >= cursor_tap_until &&
+            views.bottom_shown) {
+            down = true;
+            mx = views.bottom.x + atap_x / 256.0f * views.bottom.w;
+            my = views.bottom.y + atap_y / 192.0f * views.bottom.h;
         }
 #endif
         bool touching = false;

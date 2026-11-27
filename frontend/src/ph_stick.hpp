@@ -23,9 +23,16 @@ public:
     // to leave the touch screen alone (the stick at rest, or the game not taking stylus moves now).
     bool touch_for(const ntr::Runtime& rt, float x, float y, int& tx, int& ty);
 
+    // Where Link is on the touch screen (DS pixels), as last worked out from the game's touch state (see
+    // touch_for), or false if the stick has never tracked him — the x/y are then just the centre default and
+    // must not be used. The position freezes when the stick is released, which is where Link stopped; it goes
+    // stale if Link then moves by finger, until the stick is used again.
+    bool link_pos(float& x, float& y) const;
+
 private:
     bool holding_ = false;          // last frame's touch was the stick's
     float link_x_ = 128, link_y_ = 96;  // where Link is on the touch screen (DS pixels), as last worked out
+    bool have_link_ = false;        // (link_x_/link_y_ have been worked out from a sane game reading)
     int last_tx_ = 0, last_ty_ = 0;
     int sense_ = 0;  // which way the game's angle points: 0 not known yet, 1 Link to touch, 2 touch to Link
     int last_pick_ = 0, votes_ = 0;
